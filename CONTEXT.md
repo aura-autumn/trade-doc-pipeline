@@ -1,5 +1,5 @@
-# Trade Document Pipeline — GoComet Nova DAW
-## Status: FROZEN — Part 1 complete
+# Trade Document Pipeline
+# Part 1 complete
 
 ---
 
@@ -16,7 +16,7 @@
         v
 [LangGraph: extractor node (passthrough) → validator node → router node]
         |
-        ├── validator: run_validator(extraction_map, rules) — cross-doc reconciliation included
+        ├── validator: run_validator(extraction_map, rules) cross-doc reconciliation included
         ├── router: rule-based decision + LLM reasoning + draft email
         |
         v
@@ -52,10 +52,10 @@ structured answer  per-shipment pkl store
 
 ## Key Decisions (locked)
 
-- **LLM provider**: groq (default, free) | gemini | openai | ollama — swap via `LLM_PROVIDER` env var
-- **Gemini model**: `gemini-2.0-flash` (not 1.5-flash — deprecated)
-- **Checkpointer**: `MemorySaver` (not SqliteSaver — context manager issue on Windows)
-- **RAG**: FAISS + TF-IDF/SVD (no torch, no onnxruntime, no ChromaDB — Windows DLL safe)
+- **LLM provider**: groq (default, free) | gemini | openai | ollama : swap via `LLM_PROVIDER` env var
+- **Gemini model**: `gemini-2.0-flash`
+- **Checkpointer**: `MemorySaver`
+- **RAG**: FAISS + TF-IDF/SVD
 - **Multi-doc**: extraction runs before graph, passed as pre-populated state. Validator does cross-doc reconciliation natively.
 - **run_pipeline signature**: `run_pipeline(docs: list[tuple[str,str]], customer_id: str)`
 - **Extraction return**: keyed by filename for UI, keyed by doc_id internally
@@ -111,15 +111,3 @@ streamlit run ui/app.py
 ```
 
 ---
-
-## What still needs doing (Part 1)
-
-- [ ] PRD (3-5 pages) — write after demo works
-- [ ] Technical write-up (1-2 pages) — architecture diagram + failure modes + cost/latency
-- [ ] 2-3 min demo video
-- [ ] README final polish
-- [ ] 2 sample docs (one clean, one messy) committed to repo
-
-## Part 2 (gated — do not start until Part 1 reviewed)
-
-Email trigger → multi-doc per shipment → cross-validate → draft reply → CG reviews and sends

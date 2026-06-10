@@ -1,4 +1,4 @@
-# Technical Write-up — Multi-Agent Trade Document Pipeline
+# Technical Write-up: Multi-Agent Trade Document Pipeline
 **Nova · GoComet · Part 1**
 
 This is the "what I built and how I reason about it" companion to the PRD. All numbers below come from running the POC on the sample documents in `data/sample_docs/`.
@@ -18,10 +18,10 @@ This is the "what I built and how I reason about it" companion to the PRD. All n
         │     run_extractor(path) ─► {field:{value,confidence,     │
         │                              method}}                    │
         │     │  Extractor [agents/extractor.py]                   │
-        │     │  PDF text layer: pdfplumber→PyMuPDF→pdfminer        │
-        │     │  scan/empty:     PyMuPDF render → Tesseract OCR     │
-        │     │  last resort:    VISION LLM (Gemini/GPT-4o/LLaVA)   │
-        │     │  → text LLM extracts 8 fields + confidence          │
+        │     │  PDF text layer: pdfplumber→PyMuPDF→pdfminer       │
+        │     │  scan/empty:     PyMuPDF render → Tesseract OCR    │
+        │     │  last resort:    VISION LLM (Gemini/GPT-4o/LLaVA)  │
+        │     │  → text LLM extracts 8 fields + confidence         │
         │     ▼                                                    │
         │  LangGraph StateGraph  (thread_id = shipment_id)         │
         │     [extractor passthrough] ─► [validator] ─► [router]   │
@@ -57,15 +57,15 @@ This is the "what I built and how I reason about it" companion to the PRD. All n
 
 **B. OCR garbage / low-confidence scans.** When a PDF has no text layer we render at 300 DPI and OCR with Tesseract, which on poor scans yields noisy strings. The risk is confidently extracting nonsense. **Handling:** an 80-alphanumeric-char floor before we trust OCR text; a 0.6 confidence gate that turns anything unsure into `uncertain` (blocks auto-approve); and a bounded **vision-LLM fallback** when OCR is empty. **Observed:** low-confidence fields surface as ⚠ Uncertain in the UI and never reach `auto_approve`.
 
-**C. Cross-document inconsistency.** A real shipment is BOL + Invoice + Packing List; consignee, HS code and gross weight must agree across all three. `batch_002/` reproduces this — `invoice_good` (CIF, Port Said) vs `invoice_mismatch` (FOB, Singapore) share a consignee but disagree on Incoterms and discharge port. Per-doc validation alone would miss it. **Handling:** when a shipment has >1 doc, the validator builds a per-field cross-map and flags any field whose normalized value differs across docs as a **critical cross-doc discrepancy**. **Observed:** uploading both as one shipment produces `cross_doc_discrepancy_*` rows and forces an amendment.
+**C. Cross-document inconsistency.** A real shipment is BOL + Invoice + Packing List; consignee, HS code and gross weight must agree across all three. `batch_002/` reproduces this `invoice_good` (CIF, Port Said) vs `invoice_mismatch` (FOB, Singapore) share a consignee but disagree on Incoterms and discharge port. Per-doc validation alone would miss it. **Handling:** when a shipment has >1 doc, the validator builds a per-field cross-map and flags any field whose normalized value differs across docs as a **critical cross-doc discrepancy**. **Observed:** uploading both as one shipment produces `cross_doc_discrepancy_*` rows and forces an amendment.
 
-*(Bonus, handled: a model that returns prose or fenced/invalid JSON. Both extractor and router strip code fences, `json.loads`, and fall back — the router to a deterministic templated reasoning + email, the extractor to an empty structure marked `method="failed"` — so a bad model response degrades loudly, never silently.)*
+*(Bonus, handled: a model that returns prose or fenced/invalid JSON. Both extractor and router strip code fences, `json.loads`, and fall back is the router to a deterministic templated reasoning + email, the extractor to an empty structure marked `method="failed"` so a bad model response degrades loudly, never silently.)*
 
 ---
 
 ## 3 | Observability (production for 50 customers)
 
-**Trace one shipment, email → verified output:** everything is keyed by `shipment_id`. Given one ID you can replay the full chain — `shipment_documents` (what arrived) → `extraction_results` (every field, confidence, extraction `method`) → `validation_results` (per-field status, found/expected, cross-doc rows) → `decisions` (decision, reasoning, draft email) → the per-shipment RAG store → any NL queries run against it. For production I'd add **LangSmith tracing** (already a dependency) for per-agent spans + token counts, structured logs tagged with `shipment_id` + `customer_id`, and a persisted `latency_ms`/`cost` per stage.
+**Trace one shipment, email → verified output:** everything is keyed by `shipment_id`. Given one ID you can replay the full chain `shipment_documents` (what arrived) → `extraction_results` (every field, confidence, extraction `method`) → `validation_results` (per-field status, found/expected, cross-doc rows) → `decisions` (decision, reasoning, draft email) → the per-shipment RAG store → any NL queries run against it. For production I'd add **LangSmith tracing** (already a dependency) for per-agent spans + token counts, structured logs tagged with `shipment_id` + `customer_id`, and a persisted `latency_ms`/`cost` per stage.
 
 **Dashboard would show:** STP rate and false-auto-approve rate (the two headline numbers); flag/amendment rates; per-customer volume and pending-queue depth; p50/p95 latency per doc; cost per doc and the **vision-fallback share** (the cost driver); confidence calibration (confident-wrong rate); top mismatched fields; and LLM error/retry rate.
 
@@ -89,7 +89,7 @@ This is the "what I built and how I reason about it" companion to the PRD. All n
 
 Measured ~**3.7 s/doc** end-to-end on the clean samples. Breakdown: native-text extraction is <0.5 s, but **OCR on scanned pages (300 DPI, per page)** is 1–3 s/page, and the two **sequential LLM round-trips** (extractor, then router) are ~1–2 s each. So the slowest hops are (a) OCR rendering for scans and (b) the serial LLM calls.
 
-**What I'd do to fix it:** the multi-doc loop extracts documents **sequentially** — parallelize it (asyncio/threads) so a 3-doc shipment isn't 3× the latency; only the extractor and router actually need the model, and they're already minimal; drop OCR DPI to ~200 with a quality check; and use a faster model tier where accuracy allows. The validator is free (pure Python), so it's never the bottleneck.
+**What I'd do to fix it:** the multi-doc loop extracts documents **sequentially**  parallelize it (asyncio/threads) so a 3-doc shipment isn't 3× the latency; only the extractor and router actually need the model, and they're already minimal; drop OCR DPI to ~200 with a quality check; and use a faster model tier where accuracy allows. The validator is free (pure Python), so it's never the bottleneck.
 
 ---
 
@@ -97,8 +97,8 @@ Measured ~**3.7 s/doc** end-to-end on the clean samples. Breakdown: native-text 
 
 - **Durable checkpointing:** swap `MemorySaver` for a SQLite/Postgres LangGraph checkpointer so recovery is graph-level, not just via re-readable SQLite rows.
 - **Parallel multi-doc extraction** and a proper async pipeline (biggest latency win).
-- **Real embeddings for RAG** (replace TF-IDF/SVD) so source-snippet retrieval for "what does the doc say about X" is genuinely strong — it matters most for Part 2's discrepancy-detail view.
+- **Real embeddings for RAG** (replace TF-IDF/SVD) so source-snippet retrieval for "what does the doc say about X" is genuinely strong it matters most for Part 2's discrepancy-detail view.
 - **A labeled calibration set** to tune the 0.6 threshold per field and per customer, instead of one global cut-off.
 - **Rule versioning + audit UI**, and a **human-review queue** that captures every override as a training signal.
-- **The Part 2 email trigger** wired end-to-end, since the trigger — not the model — is what makes this a real workflow.
+- **The Part 2 email trigger** wired end-to-end, since the trigger and not the model is what makes this a real workflow.
 - **Honest hardening:** retry/timeout budgets per provider, a dead-letter path for docs that fail all extraction methods, and unit tests on the deterministic validator (its correctness is the system's trust anchor).

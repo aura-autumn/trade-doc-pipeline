@@ -1,4 +1,4 @@
-# Trade Document Pipeline — GoComet Nova
+# Trade Document Pipeline
 
 Multi-agent pipeline for trade document extraction, validation, and routing.
 
@@ -13,9 +13,9 @@ Upload (PDF/Image) → Extractor → Validator → Router → SQLite
 ```
 
 **Three LangGraph agents:**
-- **Extractor** — vision LLM extracts 8 fields with per-field confidence. Text fallback for PDFs when vision fails.
-- **Validator** — rule-based validation per customer (exact / contains / regex / not_null). Cross-document reconciliation for multi-doc shipments. Never silently approves uncertain fields (confidence < 0.6).
-- **Router** — rule-based decision (auto_approve / flag_for_review / draft_amendment) + LLM-generated reasoning and draft amendment email.
+- **Extractor**: vision LLM extracts 8 fields with per-field confidence. Text fallback for PDFs when vision fails.
+- **Validator**: rule-based validation per customer (exact / contains / regex / not_null). Cross-document reconciliation for multi-doc shipments. Never silently approves uncertain fields (confidence < 0.6).
+- **Router**: rule-based decision (auto_approve / flag_for_review / draft_amendment) + LLM-generated reasoning and draft amendment email.
 
 ## Setup
 
@@ -33,7 +33,7 @@ streamlit run ui/app.py
 
 | Provider | Cost | Vision | Setup |
 |---|---|---|---|
-| `groq` | Free | Via LLaMA 4 Scout | [console.groq.com](https://console.groq.com) — no credit card |
+| `groq` | Free | Via LLaMA 4 Scout | [console.groq.com](https://console.groq.com) no credit card |
 | `gemini` | Free tier | Yes | [aistudio.google.com](https://aistudio.google.com) |
 | `openai` | Paid | Yes | OpenAI API key |
 | `ollama` | Free (local) | llava | `ollama pull llava && ollama pull llama3.2` |
@@ -47,11 +47,11 @@ GROQ_API_KEY=your_key_here
 ## Usage
 
 1. Open http://localhost:8501
-2. **Run Pipeline** — select customer, upload one or more trade docs, click Run
-3. **Shipment History** — browse past runs, see per-field issues
-4. **Query Layer** — ask natural language questions ("how many flagged this week?")
-5. **Manage Customers** — add customers and define validation rules
-6. **Eval** — run offline accuracy evaluation
+2. **Run Pipeline** : select customer, upload one or more trade docs, click Run
+3. **Shipment History** : browse past runs, see per-field issues
+4. **Query Layer** : ask natural language questions ("how many flagged this week?")
+5. **Manage Customers** : add customers and define validation rules
+6. **Eval** : run offline accuracy evaluation
 
 ## Multi-Document Support
 
