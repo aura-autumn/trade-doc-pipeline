@@ -1,7 +1,6 @@
 # Technical Write-up: Multi-Agent Trade Document Pipeline
-**Nova · GoComet · Part 1**
 
-This is the "what I built and how I reason about it" companion to the PRD. All numbers below come from running the POC on the sample documents in `data/sample_docs/`.
+ All numbers below come from running the POC on the sample documents in `data/sample_docs/`.
 
 ---
 
@@ -59,13 +58,11 @@ This is the "what I built and how I reason about it" companion to the PRD. All n
 
 **C. Cross-document inconsistency.** A real shipment is BOL + Invoice + Packing List; consignee, HS code and gross weight must agree across all three. `batch_002/` reproduces this `invoice_good` (CIF, Port Said) vs `invoice_mismatch` (FOB, Singapore) share a consignee but disagree on Incoterms and discharge port. Per-doc validation alone would miss it. **Handling:** when a shipment has >1 doc, the validator builds a per-field cross-map and flags any field whose normalized value differs across docs as a **critical cross-doc discrepancy**. **Observed:** uploading both as one shipment produces `cross_doc_discrepancy_*` rows and forces an amendment.
 
-*(Bonus, handled: a model that returns prose or fenced/invalid JSON. Both extractor and router strip code fences, `json.loads`, and fall back is the router to a deterministic templated reasoning + email, the extractor to an empty structure marked `method="failed"` so a bad model response degrades loudly, never silently.)*
-
 ---
 
 ## 3 | Observability (production for 50 customers)
 
-**Trace one shipment, email → verified output:** everything is keyed by `shipment_id`. Given one ID you can replay the full chain `shipment_documents` (what arrived) → `extraction_results` (every field, confidence, extraction `method`) → `validation_results` (per-field status, found/expected, cross-doc rows) → `decisions` (decision, reasoning, draft email) → the per-shipment RAG store → any NL queries run against it. For production I'd add **LangSmith tracing** (already a dependency) for per-agent spans + token counts, structured logs tagged with `shipment_id` + `customer_id`, and a persisted `latency_ms`/`cost` per stage.
+**Trace one shipment, email → verified output:** everything is keyed by `shipment_id`. Given one ID you can replay the full chain `shipment_documents` (what arrived) → `extraction_results` (every field, confidence, extraction `method`) → `validation_results` (per-field status, found/expected, cross-doc rows) → `decisions` (decision, reasoning, draft email) → the per-shipment RAG store → any NL queries run against it. For production I'd add **LangSmith tracing** for per-agent spans + token counts, structured logs tagged with `shipment_id` + `customer_id`, and a persisted `latency_ms`/`cost` per stage.
 
 **Dashboard would show:** STP rate and false-auto-approve rate (the two headline numbers); flag/amendment rates; per-customer volume and pending-queue depth; p50/p95 latency per doc; cost per doc and the **vision-fallback share** (the cost driver); confidence calibration (confident-wrong rate); top mismatched fields; and LLM error/retry rate.
 

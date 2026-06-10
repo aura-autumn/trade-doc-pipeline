@@ -23,11 +23,25 @@ Upload (PDF/Image) → Extractor → Validator → Router → SQLite
 git clone <repo>
 cd trade-doc-pipeline
 pip install -r requirements.txt
-cp .env.example .env        # edit: set LLM_PROVIDER and API key
-python -m db.database       # init DB + seed 5 demo customers
+cp .env.example .env        # set LLM_PROVIDER and API key. Deafult: groq. (code is configured for the same)
+python -m db.database       # init DB + seed 5 demo customers (will run on streamlit run as well. can skip)
 python generate_samples.py  # create sample test PDFs
 streamlit run ui/app.py
 ```
+## System Dependencies
+
+### Tesseract-OCR (Required for scanned PDFs)
+Used for PDF OCR fallback when the text layer is empty or poor quality. Install from:
+- **Windows:** https://github.com/UB-Mannheim/tesseract/wiki (installer sets PATH automatically in many cases)
+- **Mac:** `brew install tesseract`
+- **Linux:** `sudo apt-get install tesseract-ocr`
+
+**Verify:**
+```bash 
+tesseract --version
+```
+
+The pipeline auto-detects Tesseract at common install locations. If detection fails, set `TESSERACT_CMD` manually or reinstall.
 
 ## LLM Providers
 
