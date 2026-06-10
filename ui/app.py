@@ -450,9 +450,14 @@ elif page == "❓ Query Layer":
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        # Pre-fill from example button clicks
-        prefill = st.session_state.pop("prefill_query", "")
-        query = st.text_input("Ask a question...", value=prefill, placeholder="How many shipments were flagged this week?")
+        # Keyed widget so example-query buttons AND typed input survive the rerun
+        # triggered by clicking "Ask". A keyless value= input resets to empty on that
+        # rerun, which left `query` falsy and silently dropped the question (blank answer).
+        query = st.text_input(
+            "Ask a question...",
+            key="nl_query_input",
+            placeholder="How many shipments were flagged this week?",
+        )
 
         shipment_id_opt = st.text_input("(Optional) Shipment ID for document-specific questions", "")
 
@@ -477,10 +482,14 @@ elif page == "❓ Query Layer":
 
     with col2:
         st.caption("**Example queries:**")
+
+        def _use_example(example: str):
+            # Set in an on_click callback — callbacks run before the text_input is
+            # re-instantiated, which is the only point Streamlit allows writing its key.
+            st.session_state["nl_query_input"] = example
+
         for eq in EXAMPLE_QUERIES:
-            if st.button(eq, key=eq):
-                st.session_state["prefill_query"] = eq
-                st.rerun()
+            st.button(eq, key=f"ex_{eq}", on_click=_use_example, args=(eq,))
 
 
 # =====================
