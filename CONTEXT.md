@@ -1,251 +1,113 @@
-# Trade Document Pipeline — GoComet DAW Assignment
-## Last updated: Session 1
+# Trade Document Pipeline
+# Part 1 complete
 
 ---
 
-## Goal
-Build a multi-agent trade document validation pipeline for GoComet's Nova platform.
-Part 1 of a 2-part assignment. 6-hour target.
-
----
-
-## HLD
+## Architecture
 
 ```
-[Input: PDF/Image + customer_id]
+[Upload: PDF/Image(s)] + [Customer ID]
         |
         v
-[LangGraph Pipeline]
+[run_pipeline(docs, customer_id)]  ← accepts list of (path, filename) tuples
         |
-   _____|______
-  |            |
-  v            v
-[Extractor]  [Customer Rules] <-- SQLite (rules per customer)
-Vision LLM (primary: Gemini Flash free tier)
-Docling (fallback for low-confidence/bad quality docs)
-Output: JSON + per-field confidence score
+        ├── for each doc: run_extractor() → extraction_map {doc_id: {field: {value, confidence}}}
         |
         v
-[Validator]
-Rule match per field: match | mismatch | uncertain
-Never silent approve. Uncertain fields always surfaced.
-Output: field-level validation result
+[LangGraph: extractor node (passthrough) → validator node → router node]
+        |
+        ├── validator: run_validator(extraction_map, rules) cross-doc reconciliation included
+        ├── router: rule-based decision + LLM reasoning + draft email
         |
         v
-[Router]
-Decision: auto-approve | flag-for-review | draft-amendment
-Produces reasoning + draft amendment email if needed
-        |
-        v
-[SQLite Store]
-Tables: shipments, validation_results, customer_rules, documents
+[SQLite: shipments, shipment_documents, extraction_results, validation_results, decisions]
         |
       __|___________
      |              |
      v              v
-[Text-to-SQL]    [RAG Layer]
-NL → SQL →       Embed original docs (ChromaDB)
-structured answer  Answer "where in doc" questions
-                   Source snippet retrieval
-        |
-        v
-[Streamlit UI]
-- Customer selector / creator
-- Rule set editor per customer
-- Upload doc (PDF or image)
-- Live LangGraph pipeline state
-- Field table: value + confidence
-- Validation result per field
-- Decision + reasoning
-- Draft amendment email (editable, never auto-send)
-- NL query box
-
-[Eval Script]
-- Runs pipeline on labeled test docs
-- Compares extracted fields to ground truth
-- Reports: field accuracy, confidence calibration, flag rate
+[Text-to-SQL]    [FAISS RAG]
+NL → SQL →       TF-IDF + SVD + FAISS
+structured answer  per-shipment pkl store
 ```
 
 ---
 
-## Tech Stack
+## File Map
 
-| Layer | Choice | Reason |
+| File | Purpose | Last changed |
 |---|---|---|
-| Orchestration | LangGraph | State persistence, crash recovery, showcases skills |
-| Primary LLM | Gemini Flash (free tier) | No cost, vision capable |
-| Fallback LLM | Ollama + LLaVA (local) | No cost, works offline |
-| PDF extraction fallback | Docling | Better structured extraction for bad quality docs |
-| Storage | SQLite | Zero infra, queryable |
-| Vector store | ChromaDB | Local, no infra |
-| Embeddings | sentence-transformers | Free, local |
-| UI | Streamlit | Fastest to ship |
-| Language | Python 3.11+ | |
+| `db/schema.sql` | DB schema | Session 2 |
+| `db/database.py` | All DB helpers + seed data | Session 2 |
+| `llm/client.py` | Swappable LLM (groq/gemini/openai/ollama) | Session 2 |
+| `agents/extractor.py` | Vision LLM + text fallback, confidence scores | Session 2 |
+| `agents/validator.py` | Rule engine + cross-doc reconciliation | Session 2 |
+| `agents/router.py` | Decision logic + LLM email draft | Session 2 |
+| `pipeline/graph.py` | LangGraph graph + multi-doc run_pipeline | Session 3 (fixed) |
+| `rag/retriever.py` | FAISS + TF-IDF/SVD, no torch dependency | Session 2 |
+| `query/nl_query.py` | Text-to-SQL + RAG routing | Session 2 |
+| `eval/eval.py` | Offline eval script | Session 1 |
+| `ui/app.py` | Streamlit UI | Session 3 (fixed) |
 
 ---
 
-## LLM Client Design
-- Swappable via env var: `LLM_PROVIDER=gemini|openai|ollama`
-- All agents use the same client interface
-- Vision calls routed to vision-capable model automatically
+## Key Decisions (locked)
+
+- **LLM provider**: groq (default, free) | gemini | openai | ollama : swap via `LLM_PROVIDER` env var
+- **Gemini model**: `gemini-2.0-flash`
+- **Checkpointer**: `MemorySaver`
+- **RAG**: FAISS + TF-IDF/SVD
+- **Multi-doc**: extraction runs before graph, passed as pre-populated state. Validator does cross-doc reconciliation natively.
+- **run_pipeline signature**: `run_pipeline(docs: list[tuple[str,str]], customer_id: str)`
+- **Extraction return**: keyed by filename for UI, keyed by doc_id internally
 
 ---
 
-## DB Schema
+## DB Schema (current)
 
-```sql
--- Customers and their rule sets
-CREATE TABLE customers (
-    id TEXT PRIMARY KEY,
-    name TEXT,
-    created_at TIMESTAMP
-);
-
-CREATE TABLE customer_rules (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    customer_id TEXT,
-    field_name TEXT,         -- e.g. "incoterms", "consignee_name"
-    expected_value TEXT,     -- exact match or pattern
-    rule_type TEXT,          -- exact | contains | regex | not_null
-    is_critical BOOLEAN,     -- critical mismatches force amendment
-    FOREIGN KEY (customer_id) REFERENCES customers(id)
-);
-
--- Document runs
-CREATE TABLE shipments (
-    id TEXT PRIMARY KEY,
-    customer_id TEXT,
-    doc_path TEXT,
-    status TEXT,             -- processing | approved | flagged | amendment_sent
-    created_at TIMESTAMP,
-    FOREIGN KEY (customer_id) REFERENCES customers(id)
-);
-
-CREATE TABLE extraction_results (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    shipment_id TEXT,
-    field_name TEXT,
-    field_value TEXT,
-    confidence REAL,         -- 0.0 to 1.0
-    FOREIGN KEY (shipment_id) REFERENCES shipments(id)
-);
-
-CREATE TABLE validation_results (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    shipment_id TEXT,
-    field_name TEXT,
-    status TEXT,             -- match | mismatch | uncertain | not_checked
-    found_value TEXT,
-    expected_value TEXT,
-    FOREIGN KEY (shipment_id) REFERENCES shipments(id)
-);
-
-CREATE TABLE decisions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    shipment_id TEXT,
-    decision TEXT,           -- auto_approve | flag_for_review | draft_amendment
-    reasoning TEXT,
-    draft_email TEXT,
-    created_at TIMESTAMP,
-    FOREIGN KEY (shipment_id) REFERENCES shipments(id)
-);
+```
+customers(id, name, created_at)
+customer_rules(id, customer_id, field_name, expected_value, rule_type, is_critical, description)
+shipments(id, customer_id, status, created_at, updated_at)
+shipment_documents(id, shipment_id, doc_path, doc_filename, doc_type, version_number, uploaded_at)
+extraction_results(id, shipment_id, document_id, field_name, field_value, confidence, extraction_method)
+validation_results(id, shipment_id, document_id, field_name, status, found_value, expected_value, rule_type, is_critical, detail)
+decisions(id, shipment_id, decision, reasoning, draft_email, created_at)
 ```
 
 ---
 
-## Required Extracted Fields (minimum bar)
-- consignee_name
-- hs_code
-- port_of_loading
-- port_of_discharge
-- incoterms
-- description_of_goods
-- gross_weight
-- invoice_number
+## Bugs fixed (Session 3)
+
+1. Gemini model `gemini-1.5-flash` → `gemini-2.0-flash`
+2. `SqliteSaver.from_conn_string()` returns context manager → replaced with `MemorySaver`
+3. `run_router` called with wrong positional args (summary passed as shipment_id)
+4. `decision_packet["decision_status"]` key didn't exist → mapped via status_map
+5. `doc_filename` KeyError in shipment history (removed from shipments table) → fetch from shipment_documents via subquery
+6. Query layer button result lost on rerender → stored in session_state
+7. Multi-doc upload: `file_uploader` now `accept_multiple_files=True`, `run_pipeline` accepts list of docs
 
 ---
 
-## LangGraph State Shape
+## Demo Customers
 
-```python
-class PipelineState(TypedDict):
-    shipment_id: str
-    customer_id: str
-    doc_path: str
-    doc_text: str                    # raw extracted text
-    extraction: dict                 # field -> {value, confidence}
-    validation: list                 # [{field, status, found, expected}]
-    decision: str                    # auto_approve | flag_for_review | draft_amendment
-    reasoning: str
-    draft_email: str
-    error: str                       # non-empty if pipeline errored
-    current_node: str                # for crash recovery visibility
+| ID | Name | Key Rules |
+|---|---|---|
+| CUST001 | Global Freight Corp | Incoterms=CIF, POL=Shanghai, HS not null, weight not null |
+| CUST002 | Apex Logistics LLC | Incoterms=FOB or EXW (regex), consignee contains APEX LOGISTICS |
+| CUST003 | Zenith Trading | Incoterms=FOB, POD=Rotterdam, weight not null |
+| CUST004 | Oceanic Ventures | Incoterms=DDP or DAP (regex), invoice not null |
+| CUST005 | AutoParts Express | Incoterms=EXW, HS=^8708, consignee=AUTOPARTS EXPRESS |
+
+---
+
+## Run instructions
+
+```bash
+cp .env.example .env          # set LLM_PROVIDER + API key
+pip install -r requirements.txt
+python -m db.database         # init DB + seed customers
+python generate_samples.py    # create test PDFs (needs reportlab)
+streamlit run ui/app.py
 ```
 
 ---
-
-## Project Structure
-
-```
-trade-doc-pipeline/
-├── CONTEXT.md                  # this file
-├── README.md
-├── requirements.txt
-├── .env.example
-├── db/
-│   ├── schema.sql
-│   └── database.py             # DB init + helpers
-├── llm/
-│   └── client.py               # swappable LLM client
-├── agents/
-│   ├── extractor.py
-│   ├── validator.py
-│   └── router.py
-├── pipeline/
-│   └── graph.py                # LangGraph definition
-├── rag/
-│   └── retriever.py            # ChromaDB + embeddings
-├── query/
-│   └── nl_query.py             # Text-to-SQL + RAG query
-├── eval/
-│   └── eval.py                 # offline eval script
-├── ui/
-│   └── app.py                  # Streamlit app
-├── data/
-│   ├── sample_docs/            # test documents
-│   └── ground_truth.json       # for eval
-└── tests/
-```
-
----
-
-## Build Order
-- [x] CONTEXT.md
-- [ ] Project structure + requirements.txt + .env.example
-- [ ] DB schema + database.py
-- [ ] LLM client (swappable)
-- [ ] Extractor Agent
-- [ ] Validator Agent
-- [ ] Router Agent
-- [ ] LangGraph graph wiring
-- [ ] RAG layer
-- [ ] Text-to-SQL query layer
-- [ ] Streamlit UI
-- [ ] Eval script
-- [ ] README
-- [ ] PRD (last)
-
----
-
-## Key Constraints / Decisions
-- Agent never sends email on its own. CG always reviews.
-- Uncertain fields always surfaced, never silently approved.
-- Low confidence (< 0.6) = uncertain, not approved.
-- Customer rules stored in DB, not hardcoded.
-- LLM provider swappable via env var.
-- Docling used as fallback when extraction confidence is low overall.
-
----
-
-## Notes / Decisions Log
-- Session 1: HLD finalized, context file created, starting code.

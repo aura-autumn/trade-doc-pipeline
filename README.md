@@ -1,128 +1,93 @@
-# Trade Document Pipeline — GoComet Nova
+# Trade Document Pipeline
 
-Multi-agent system for trade document extraction, validation, and routing.
+Multi-agent pipeline for trade document extraction, validation, and routing.
 
 ## Architecture
 
 ```
-PDF/Image → Extractor Agent → Validator Agent → Router Agent → SQLite
-                                                      ↓
-                                              NL Query Layer (Text-to-SQL + RAG)
-                                                      ↓
-                                              Streamlit UI
+Upload (PDF/Image) → Extractor → Validator → Router → SQLite
+                                                  ↓
+                                         NL Query (Text-to-SQL + RAG)
+                                                  ↓
+                                           Streamlit UI
 ```
 
-Three LangGraph agents:
-- **Extractor**: Vision LLM extracts 8 structured fields with confidence scores. Docling fallback for low-quality docs.
-- **Validator**: Rule-based validation per customer. Never silently approves uncertain fields.
-- **Router**: Decides auto_approve / flag_for_review / draft_amendment. LLM generates reasoning and draft email.
+**Three LangGraph agents:**
+- **Extractor**: vision LLM extracts 8 fields with per-field confidence. Text fallback for PDFs when vision fails.
+- **Validator**: rule-based validation per customer (exact / contains / regex / not_null). Cross-document reconciliation for multi-doc shipments. Never silently approves uncertain fields (confidence < 0.6).
+- **Router**: rule-based decision (auto_approve / flag_for_review / draft_amendment) + LLM-generated reasoning and draft amendment email.
 
 ## Setup
 
-### 1. Clone and install
-
 ```bash
+git clone <repo>
 cd trade-doc-pipeline
 pip install -r requirements.txt
-```
-
-### 2. Configure environment
-
-```bash
-cp .env.example .env
-# Edit .env — set your LLM provider and API key
-```
-
-**Option A — Gemini (free tier, recommended):**
-```
-LLM_PROVIDER=gemini
-GEMINI_API_KEY=your_key_here
-```
-Get a free key at https://aistudio.google.com/
-
-**Option B — OpenAI:**
-```
-LLM_PROVIDER=openai
-OPENAI_API_KEY=your_key_here
-```
-
-**Option C — Ollama (fully local, no API key):**
-```bash
-# Install Ollama: https://ollama.ai
-ollama pull llava       # vision model
-ollama pull llama3.2    # text model
-```
-```
-LLM_PROVIDER=ollama
-```
-
-### 3. Initialize database
-
-```bash
-python -m db.database
-```
-
-This creates the SQLite DB and seeds 5 demo customers with rules.
-
-### 4. Run the UI
-
-```bash
+cp .env.example .env        # set LLM_PROVIDER and API key. Deafult: groq. (code is configured for the same)
+python -m db.database       # init DB + seed 5 demo customers (will run on streamlit run as well. can skip)
+python generate_samples.py  # create sample test PDFs
 streamlit run ui/app.py
 ```
+## System Dependencies
 
-Open http://localhost:8501
+### Tesseract-OCR (Required for scanned PDFs)
+Used for PDF OCR fallback when the text layer is empty or poor quality. Install from:
+- **Windows:** https://github.com/UB-Mannheim/tesseract/wiki (installer sets PATH automatically in many cases)
+- **Mac:** `brew install tesseract`
+- **Linux:** `sudo apt-get install tesseract-ocr`
+
+**Verify:**
+```bash 
+tesseract --version
+```
+
+The pipeline auto-detects Tesseract at common install locations. If detection fails, set `TESSERACT_CMD` manually or reinstall.
+
+## LLM Providers
+
+| Provider | Cost | Vision | Setup |
+|---|---|---|---|
+| `groq` | Free | Via LLaMA 4 Scout | [console.groq.com](https://console.groq.com) no credit card |
+| `gemini` | Free tier | Yes | [aistudio.google.com](https://aistudio.google.com) |
+| `openai` | Paid | Yes | OpenAI API key |
+| `ollama` | Free (local) | llava | `ollama pull llava && ollama pull llama3.2` |
+
+Set in `.env`:
+```
+LLM_PROVIDER=groq
+GROQ_API_KEY=your_key_here
+```
 
 ## Usage
 
-1. Go to **Run Pipeline**
-2. Select a customer (5 demo customers are pre-loaded)
-3. Upload a trade document (PDF or image)
-4. Click **Run Pipeline**
-5. View extracted fields, validation results, decision, and draft amendment email
+1. Open http://localhost:8501
+2. **Run Pipeline** : select customer, upload one or more trade docs, click Run
+3. **Shipment History** : browse past runs, see per-field issues
+4. **Query Layer** : ask natural language questions ("how many flagged this week?")
+5. **Manage Customers** : add customers and define validation rules
+6. **Eval** : run offline accuracy evaluation
 
-## Run Pipeline from CLI
+## Multi-Document Support
 
-```bash
-python -m pipeline.graph <doc_path> <customer_id>
-# Example:
-python -m pipeline.graph data/sample_docs/invoice.pdf CUST001
-```
-
-## Run Eval
-
-```bash
-python -m eval.eval
-```
-
-Add test documents to `data/sample_docs/` and ground truth to `data/ground_truth.json`.
-
-## Demo Customers
-
-| ID | Name | Key Rules |
-|---|---|---|
-| CUST001 | Acme Imports Ltd | Incoterms=CIF, HS 8471x, POD=Nhava Sheva |
-| CUST002 | Global Tech Distributors | Incoterms=FOB, HS 8542x, POL=Shanghai |
-| CUST003 | MediSupply Chain Co | Incoterms=DDP, HS 3004x, POD=Mumbai |
-| CUST004 | FastFashion Retail | Incoterms=CFR, HS 6109x, POD=Chennai |
-| CUST005 | AutoParts Express | Incoterms=EXW, HS 8708x |
+Upload multiple files (BOL + Commercial Invoice + Packing List) for one shipment. The validator cross-checks fields like consignee, HS code, and gross weight across all documents and flags inconsistencies.
 
 ## Project Structure
 
 ```
 trade-doc-pipeline/
 ├── db/
-│   ├── schema.sql          # DB schema
-│   └── database.py         # DB helpers + seed data
+│   ├── schema.sql          # SQLite schema
+│   └── database.py         # DB helpers + 5 seeded demo customers
 ├── llm/
-│   └── client.py           # Swappable LLM client (gemini/openai/ollama)
+│   └── client.py           # Swappable LLM client
 ├── agents/
-│   ├── extractor.py        # Vision LLM extraction + Docling fallback
-│   ├── validator.py        # Rule-based field validation
-│   └── router.py           # Decision + draft email generation
+│   ├── extractor.py        # Vision LLM + text fallback + confidence scoring
+│   ├── validator.py        # Rule engine + cross-doc reconciliation
+│   └── router.py           # Decision + LLM draft email
 ├── pipeline/
-│   └── graph.py            # LangGraph state graph
+│   └── graph.py            # LangGraph state graph + run_pipeline()
 ├── rag/
-│   └── retriever.py        # ChromaDB indexing + RAG queries
+│   └── retriever.py        # FAISS + TF-IDF/SVD (no torch dependency)
 ├── query/
 │   └── nl_query.py         # Text-to-SQL + RAG query routing
 ├── eval/
@@ -131,22 +96,27 @@ trade-doc-pipeline/
 │   └── app.py              # Streamlit UI
 └── data/
     ├── sample_docs/        # Add test documents here
-    └── ground_truth.json   # Eval ground truth labels
+    └── ground_truth.json   # Labels for eval
 ```
 
-## Key Design Decisions
+## Demo Customers (pre-seeded)
 
-**Why three agents?**
-Each has a distinct responsibility and failure mode. Extractor fails on bad docs. Validator fails on wrong rules. Router fails on ambiguous logic. Separating them means you can debug, retrain, and swap each independently.
+| ID | Customer | Key Rules |
+|---|---|---|
+| CUST001 | Global Freight Corp | CIF, Shanghai, HS not null |
+| CUST002 | Apex Logistics LLC | FOB or EXW, consignee match |
+| CUST003 | Zenith Trading | FOB, Rotterdam discharge |
+| CUST004 | Oceanic Ventures | DDP or DAP, invoice required |
+| CUST005 | AutoParts Express | EXW, HS 8708x, consignee match |
 
-**Why LangGraph?**
-State persistence via SQLite checkpointer. If the pipeline crashes mid-run, it can resume from the last checkpoint. Conditional edges handle error routing cleanly.
+## Design Decisions
 
-**Why Text-to-SQL + RAG, not just one?**
-Text-to-SQL answers structured questions ("how many flagged this week"). RAG answers document-content questions ("what does the doc say about consignee"). They serve different query types.
+**Why three agents?** Each has a distinct failure mode. Extractor fails on bad docs. Validator fails on wrong rules. Router fails on ambiguous logic. Separate agents = independent debuggability, replaceability, and eval.
 
-**Why Docling as fallback?**
-Docling parses PDF structure (tables, columns) better than pure LLM vision on low-quality scans. Used only when overall confidence is below threshold to control latency and cost.
+**Why LangGraph?** Explicit state, crash recovery via checkpointer, conditional edges for error routing. State is visible at every step.
 
-**Confidence threshold:**
-`< 0.6` = uncertain. Uncertain fields are always surfaced and never silently approved. This is non-negotiable.
+**Why FAISS over ChromaDB?** ChromaDB pulls `onnxruntime` which has DLL issues on Windows. FAISS + scikit-learn TF-IDF is lightweight, zero system dependencies, runs anywhere.
+
+**Why Text-to-SQL + RAG?** Text-to-SQL answers structured questions about the database ("how many flagged"). RAG answers document-content questions ("what does the doc say about consignee"). Different query types, different tools.
+
+**Confidence threshold:** `< 0.6` = uncertain. Uncertain fields are always surfaced and never silently approved.

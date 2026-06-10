@@ -1,192 +1,198 @@
 """
-RAG Layer
-- Embeds trade documents into ChromaDB
-- Answers "where in the doc" questions
-- Used for source snippet retrieval during validation discrepancy review
+RAG Layer — FAISS + LSA embeddings (sklearn TF-IDF + SVD).
+
+Replaces ChromaDB entirely. No onnxruntime. No sentence-transformers.
+No internet. Only faiss-cpu and scikit-learn, both already installed.
+
+Embedder: TF-IDF (10k features, bigrams) -> TruncatedSVD (128-dim) -> L2-normalised.
+One _ShipmentStore per shipment, fitted on that doc's own chunks so query vectors
+live in the same space as indexed vectors.
+
+Persistence: each store is pickled to ./data/rag_store/<hash>.pkl — one file per shipment.
 """
 
+from __future__ import annotations
 import os
+import pickle
 import hashlib
 from pathlib import Path
 from dotenv import load_dotenv
 
+import warnings
+import faiss
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import TruncatedSVD
+from sklearn.preprocessing import normalize
+
 load_dotenv()
 
-CHROMA_PATH = os.getenv("CHROMA_PATH", "./data/chroma")
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 100
+RAG_STORE     = os.getenv("RAG_STORE_PATH", "./data/rag_store")
+CHUNK_SIZE    = int(os.getenv("RAG_CHUNK_SIZE", 500))
+CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", 100))
+EMB_DIM       = 128   # SVD components — enough for short trade docs, fast to fit
 
 
-def _get_chroma_client():
-    import chromadb
-    os.makedirs(CHROMA_PATH, exist_ok=True)
-    return chromadb.PersistentClient(path=CHROMA_PATH)
+# ══════════════════════════════════════════════════════════════════════════════
+# PER-SHIPMENT STORE
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _ShipmentStore:
+    """Self-contained FAISS vector store for one shipment's document chunks."""
+
+    def __init__(self):
+        self.chunks: list[str] = []
+        self.tfidf   = TfidfVectorizer(max_features=10000, ngram_range=(1, 2),
+                                        sublinear_tf=True, min_df=1)
+        self.svd     = TruncatedSVD(n_components=EMB_DIM, random_state=42)
+        self.index   = None
+        self._fitted = False
+
+    def _fit_embed(self, texts: list[str]) -> np.ndarray:
+        matrix = self.tfidf.fit_transform(texts)
+        n_comp = min(EMB_DIM, matrix.shape[0] - 1, matrix.shape[1] - 1)
+        if n_comp < 1:
+            n_comp = 1
+        self.svd.set_params(n_components=n_comp)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            vecs = self.svd.fit_transform(matrix).astype(np.float32)
+        self._fitted = True
+        return normalize(vecs, norm="l2")
+
+    def _embed(self, texts: list[str]) -> np.ndarray:
+        matrix = self.tfidf.transform(texts)
+        vecs   = self.svd.transform(matrix).astype(np.float32)
+        return normalize(vecs, norm="l2")
+
+    def build(self, chunks: list[str]) -> int:
+        if not chunks:
+            return 0
+        self.chunks    = chunks
+        embeddings     = self._fit_embed(chunks)
+        dim            = embeddings.shape[1]
+        self.index     = faiss.IndexFlatIP(dim)
+        faiss.normalize_L2(embeddings)
+        self.index.add(embeddings)
+        return self.index.ntotal
+
+    def query(self, question: str, top_k: int = 3) -> list[dict]:
+        if not self._fitted or self.index is None or self.index.ntotal == 0:
+            return []
+        q_vec = self._embed([question]).astype(np.float32)
+        faiss.normalize_L2(q_vec)
+        k = min(top_k, self.index.ntotal)
+        scores, indices = self.index.search(q_vec, k)
+        results = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx != -1:
+                results.append({"text": self.chunks[idx], "score": float(score)})
+        return results
 
 
-def _get_embedding_function():
-    from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-    return SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+# ══════════════════════════════════════════════════════════════════════════════
+# PERSISTENCE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _store_path(shipment_id: str) -> Path:
+    os.makedirs(RAG_STORE, exist_ok=True)
+    safe = hashlib.md5(shipment_id.encode()).hexdigest()[:12]
+    return Path(RAG_STORE) / f"{safe}.pkl"
 
 
-def _get_collection():
-    client = _get_chroma_client()
-    ef = _get_embedding_function()
-    return client.get_or_create_collection(
-        name="trade_documents",
-        embedding_function=ef,
-        metadata={"hnsw:space": "cosine"}
-    )
+def _save(shipment_id: str, store: _ShipmentStore) -> None:
+    with open(_store_path(shipment_id), "wb") as f:
+        pickle.dump(store, f)
 
 
-def _extract_text_from_doc(doc_path: str) -> str:
-    """Extract raw text from PDF or image for chunking."""
-    suffix = Path(doc_path).suffix.lower()
-
-    if suffix == ".pdf":
-        try:
-            import PyPDF2
-            text = ""
-            with open(doc_path, "rb") as f:
-                reader = PyPDF2.PdfReader(f)
-                for page in reader.pages:
-                    text += page.extract_text() + "\n"
-            if text.strip():
-                return text
-        except Exception:
-            pass
-
-        # Fallback: docling
-        try:
-            from docling.document_converter import DocumentConverter
-            converter = DocumentConverter()
-            result = converter.convert(doc_path)
-            return result.document.export_to_markdown()
-        except Exception as e:
-            print(f"Text extraction failed: {e}")
-            return ""
-
-    elif suffix in (".jpg", ".jpeg", ".png", ".webp"):
-        # For images, use LLM to get text description
-        try:
-            from llm.client import get_llm, build_vision_message
-            llm = get_llm(vision=True)
-            messages = build_vision_message(
-                doc_path,
-                "Extract all text from this trade document exactly as it appears. Include all fields, values, and numbers."
-            )
-            response = llm.invoke(messages)
-            return response.content if hasattr(response, "content") else str(response)
-        except Exception as e:
-            print(f"Image text extraction failed: {e}")
-            return ""
-
-    return ""
+def _load(shipment_id: str) -> _ShipmentStore | None:
+    p = _store_path(shipment_id)
+    if not p.exists():
+        return None
+    try:
+        with open(p, "rb") as f:
+            return pickle.load(f)
+    except Exception as e:
+        print(f"[RAG] Failed to load store for {shipment_id}: {e}")
+        return None
 
 
-def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """Split text into overlapping chunks."""
+# ══════════════════════════════════════════════════════════════════════════════
+# TEXT EXTRACTION + CHUNKING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _extract_text(doc_path: str) -> str:
+    try:
+        from agents.extractor import extract_text
+        text, method = extract_text(doc_path)
+        print(f"[RAG] Text extracted via {method} ({len(text)} chars)")
+        return text
+    except Exception as e:
+        print(f"[RAG] Text extraction failed: {e}")
+        return ""
+
+
+def _chunk_text(text: str) -> list[str]:
     words = text.split()
-    chunks = []
-    i = 0
+    chunks, i = [], 0
     while i < len(words):
-        chunk = " ".join(words[i:i + chunk_size])
-        chunks.append(chunk)
-        i += chunk_size - overlap
-    return chunks
+        chunks.append(" ".join(words[i:i + CHUNK_SIZE]))
+        i += CHUNK_SIZE - CHUNK_OVERLAP
+    return [c for c in chunks if c.strip()]
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PUBLIC API  (same signatures as the old ChromaDB retriever)
+# ══════════════════════════════════════════════════════════════════════════════
 
 def index_document(doc_path: str, shipment_id: str) -> int:
-    """
-    Index a document into ChromaDB.
-    Returns number of chunks indexed.
-    """
-    text = _extract_text_from_doc(doc_path)
-    if not text.strip():
-        print(f"No text extracted from {doc_path}")
+    """Extract, chunk, embed, and persist a document. Returns chunks indexed."""
+    if _load(shipment_id) is not None:
+        print(f"[RAG] Already indexed for shipment {shipment_id} — skipping")
         return 0
-
+    text = _extract_text(doc_path)
+    if not text.strip():
+        print(f"[RAG] No text extracted from {doc_path} — skipping")
+        return 0
     chunks = _chunk_text(text)
-    collection = _get_collection()
-
-    doc_id = hashlib.md5(doc_path.encode()).hexdigest()[:8]
-
-    ids = []
-    documents = []
-    metadatas = []
-
-    for i, chunk in enumerate(chunks):
-        chunk_id = f"{shipment_id}_{doc_id}_chunk_{i}"
-        # Skip if already indexed
-        existing = collection.get(ids=[chunk_id])
-        if existing["ids"]:
-            continue
-        ids.append(chunk_id)
-        documents.append(chunk)
-        metadatas.append({
-            "shipment_id": shipment_id,
-            "doc_path": doc_path,
-            "chunk_index": i,
-        })
-
-    if ids:
-        collection.add(ids=ids, documents=documents, metadatas=metadatas)
-        print(f"Indexed {len(ids)} chunks for shipment {shipment_id}")
-
-    return len(ids)
+    if not chunks:
+        return 0
+    store = _ShipmentStore()
+    n = store.build(chunks)
+    _save(shipment_id, store)
+    print(f"[RAG] Indexed {n} chunks for shipment {shipment_id}")
+    return n
 
 
 def query_document(question: str, shipment_id: str, n_results: int = 3) -> list[dict]:
-    """
-    Query documents for a specific shipment.
-    Returns relevant snippets with metadata.
-    """
-    collection = _get_collection()
-
-    try:
-        results = collection.query(
-            query_texts=[question],
-            n_results=n_results,
-            where={"shipment_id": shipment_id},
-        )
-    except Exception as e:
-        print(f"RAG query failed: {e}")
+    """Return relevant chunks from a shipment's indexed document."""
+    store = _load(shipment_id)
+    if store is None:
+        print(f"[RAG] No index found for shipment {shipment_id}")
         return []
-
-    snippets = []
-    if results["documents"]:
-        for i, doc in enumerate(results["documents"][0]):
-            snippets.append({
-                "text": doc,
-                "distance": results["distances"][0][i] if results.get("distances") else None,
-                "metadata": results["metadatas"][0][i] if results.get("metadatas") else {},
-            })
-
-    return snippets
+    return store.query(question, top_k=n_results)
 
 
 def answer_with_rag(question: str, shipment_id: str) -> str:
-    """
-    Use RAG to answer a question about a specific document.
-    Used for "show me the source snippet" queries.
-    """
+    """Answer a question about a shipment's document using RAG + LLM."""
     snippets = query_document(question, shipment_id)
     if not snippets:
         return "No relevant content found in the document for this question."
 
-    context = "\n\n---\n\n".join([s["text"] for s in snippets])
+    context = "\n\n---\n\n".join(s["text"] for s in snippets)
 
     from llm.client import get_llm
     llm = get_llm(vision=False)
 
-    prompt = f"""You are a trade document assistant. Answer the question based ONLY on the provided document snippets.
-If the answer is not in the snippets, say "Not found in document."
+    prompt = f"""You are a trade document assistant. Answer the question based ONLY on the document snippets below.
+If the answer is not present in the snippets, say "Not found in document."
 
 Question: {question}
 
 Document snippets:
 {context}
 
-Answer concisely and quote the relevant part of the document."""
+Answer concisely and quote the exact relevant text from the document."""
 
     try:
         response = llm.invoke(prompt)
@@ -195,10 +201,9 @@ Answer concisely and quote the relevant part of the document."""
         return f"RAG answer failed: {e}"
 
 
-def delete_shipment_chunks(shipment_id: str):
-    """Remove all chunks for a shipment from the index."""
-    collection = _get_collection()
-    existing = collection.get(where={"shipment_id": shipment_id})
-    if existing["ids"]:
-        collection.delete(ids=existing["ids"])
-        print(f"Deleted {len(existing['ids'])} chunks for shipment {shipment_id}")
+def delete_shipment_chunks(shipment_id: str) -> None:
+    """Remove the persisted index for a shipment."""
+    p = _store_path(shipment_id)
+    if p.exists():
+        p.unlink()
+        print(f"[RAG] Deleted index for shipment {shipment_id}")

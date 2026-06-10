@@ -154,11 +154,19 @@ def run_eval(test_cases: list[dict] = None) -> dict:
 
         start = time.time()
         try:
-            state = run_pipeline(tc["doc_path"], tc["customer_id"])
+            state = run_pipeline(
+                [(tc["doc_path"], os.path.basename(tc["doc_path"]))],
+                tc["customer_id"],
+            )
             elapsed = time.time() - start
 
+            # run_pipeline returns extraction keyed by filename; eval is single-doc,
+            # so pull out that one document's {field: {value, confidence}} map.
+            extraction_by_file = state.get("extraction", {})
+            doc_fields = next(iter(extraction_by_file.values()), {})
+
             extraction_eval = evaluate_extraction(
-                state.get("extraction", {}),
+                doc_fields,
                 tc.get("expected_extraction", {})
             )
             decision_eval = evaluate_decision(
