@@ -1,0 +1,34 @@
+[
+  {
+    "doc_path": "./data/sample_docs/sample_clean.pdf",
+    "customer_id": "CUST001",
+    "expected_extraction": {
+      "consignee_name": "ACME IMPORTS LTD",
+      "hs_code": "84713000",
+      "port_of_loading": "SHANGHAI",
+      "port_of_discharge": "NHAVA SHEVA",
+      "incoterms": "CIF",
+      "description_of_goods": "Laptop Computers and Accessories",
+      "gross_weight": "1250 KGS",
+      "invoice_number": "INV-2024-001"
+    },
+    "expected_decision": "auto_approve",
+    "doc_type": "clean"
+  },
+  {
+    "doc_path": "./data/sample_docs/sample_mismatch.pdf",
+    "customer_id": "CUST001",
+    "expected_extraction": {
+      "consignee_name": "ACME IMPORTS LTD",
+      "hs_code": "84713000",
+      "port_of_loading": "SHANGHAI",
+      "port_of_discharge": "NHAVA SHEVA",
+      "incoterms": "FOB",
+      "description_of_goods": "Laptop Computers",
+      "gross_weight": "1100 KGS",
+      "invoice_number": "INV-2024-002"
+    },
+    "expected_decision": "draft_amendment",
+    "doc_type": "mismatch"
+  }
+]
