@@ -41,9 +41,22 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- Init ---
-init_db()
-seed_demo_customers()
+# --- Init (runs once per server session, not on every rerender) ---
+@st.cache_resource
+def _init_app():
+    init_db()
+    seed_demo_customers()
+
+_init_app()
+
+# --- Cached DB reads (invalidated only when needed) ---
+@st.cache_data(ttl=30)
+def _get_customers():
+    return get_all_customers()
+
+@st.cache_data(ttl=30)
+def _get_rules(customer_id):
+    return get_customer_rules(customer_id)
 
 
 # --- Helpers ---
@@ -109,7 +122,7 @@ if page == "▶ Run Pipeline":
     col1, col2 = st.columns([1, 1])
 
     with col1:
-        customers = get_all_customers()
+        customers = _get_customers()
         if not customers:
             st.warning("No customers found. Go to Manage Customers to add one.")
             st.stop()
@@ -127,7 +140,7 @@ if page == "▶ Run Pipeline":
 
     with col2:
         if selected_customer_id:
-            rules = get_customer_rules(selected_customer_id)
+            rules = _get_rules(selected_customer_id)
             if rules:
                 st.caption(f"**Rules for {selected_name}** ({len(rules)} rules)")
                 for r in rules:
@@ -145,7 +158,6 @@ if page == "▶ Run Pipeline":
 
         st.info(f"Processing: **{uploaded_file.name}**")
 
-        # Progress indicators
         progress = st.progress(0, text="Starting pipeline...")
         status_placeholder = st.empty()
 
@@ -154,7 +166,6 @@ if page == "▶ Run Pipeline":
                 progress.progress(10, text="📄 Extracting fields from document...")
                 status_placeholder.caption("Extractor Agent: Analyzing document with vision LLM...")
 
-                # We run the full pipeline (LangGraph handles sequencing)
                 start = time.time()
                 final_state = run_pipeline(tmp_path, selected_customer_id, uploaded_file.name)
                 elapsed = time.time() - start
@@ -165,20 +176,26 @@ if page == "▶ Run Pipeline":
                 time.sleep(0.3)
                 progress.progress(100, text="✅ Pipeline complete!")
 
-                # Index for RAG
+                # Index for RAG — errors here are non-fatal
                 try:
                     index_document(tmp_path, final_state["shipment_id"])
-                except Exception:
-                    pass
+                except Exception as rag_err:
+                    st.session_state["rag_index_error"] = str(rag_err)
 
                 st.session_state["last_state"] = final_state
                 st.session_state["last_shipment_id"] = final_state["shipment_id"]
+                # Clear stale state from previous run
+                st.session_state.pop("rag_index_error", None)
+                st.session_state["rag_chat_history"] = []  # fresh chat for new shipment
 
             except Exception as e:
                 st.error(f"Pipeline failed: {e}")
                 st.stop()
 
         st.success(f"Pipeline completed in {elapsed:.1f}s")
+
+        if "rag_index_error" in st.session_state:
+            st.warning(f"RAG indexing skipped (install `onnxruntime` to enable): {st.session_state['rag_index_error']}")
 
     # Show results
     if "last_state" in st.session_state:
@@ -187,15 +204,13 @@ if page == "▶ Run Pipeline":
 
         st.subheader(f"Results — Shipment `{shipment_id[:8]}...`")
 
-        # Decision banner
         decision = state.get("decision", "")
         if decision:
-            color = decision_color(decision)
             label = decision_label(decision)
             st.markdown(f"### {label}")
             st.info(f"**Reasoning:** {state.get('reasoning', '')}")
 
-        tab1, tab2, tab3, tab4 = st.tabs(["📋 Extraction", "🔍 Validation", "📝 Draft Email", "🔎 RAG Lookup"])
+        tab1, tab2, tab3 = st.tabs(["📋 Extraction", "🔍 Validation", "📝 Draft Email"])
 
         with tab1:
             extraction = state.get("extraction", {})
@@ -209,7 +224,7 @@ if page == "▶ Run Pipeline":
                         "Confidence": f"{confidence_color(conf)} {conf:.0%}",
                         "Method": data.get("method", "llm").upper(),
                     })
-                st.dataframe(rows, use_container_width=True, hide_index=True)
+                st.dataframe(rows, width="stretch", hide_index=True)
             else:
                 st.warning("No extraction data.")
 
@@ -223,20 +238,11 @@ if page == "▶ Run Pipeline":
                         "Status": status_badge(v["status"]),
                         "Found": v.get("found_value") or "—",
                         "Expected": v.get("expected_value") or "—",
-                        "Critical": "🔴" if v.get("is_critical") else "🔵",
+                        "Critical": "🔴" if v.get("is_critical") else "",
                         "Confidence": f"{v.get('confidence', 0):.0%}",
                         "Detail": v.get("detail", ""),
                     })
-                st.dataframe(rows, use_container_width=True, hide_index=True)
-
-                # Summary
-                summary = state.get("validation_summary", {})
-                if summary:
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Matches", summary.get("matches", 0))
-                    c2.metric("Mismatches", summary.get("mismatches", 0))
-                    c3.metric("Uncertain", summary.get("uncertain", 0))
-                    c4.metric("Missing", summary.get("missing", 0))
+                st.dataframe(rows, width="stretch", hide_index=True)
             else:
                 st.warning("No validation data.")
 
@@ -250,14 +256,92 @@ if page == "▶ Run Pipeline":
             else:
                 st.info("No draft email (document was approved or flagged without amendment).")
 
-        with tab4:
-            st.caption("Ask a question about the specific document content (RAG-powered).")
-            rag_q = st.text_input("Ask about this document...", placeholder="What is the consignee address in the document?")
-            if rag_q:
-                from rag.retriever import answer_with_rag
-                with st.spinner("Searching document..."):
-                    answer = answer_with_rag(rag_q, shipment_id)
-                st.write(answer)
+        # ── RAG Chat — outside tabs so button clicks don't reset tab position ──
+        st.divider()
+        st.markdown("#### 🔎 Ask About This Shipment")
+        st.caption(
+            "Ask anything: document content, validation results, what fields failed, why the decision was made. "
+            "The assistant has full context of both the document and the pipeline results."
+        )
+
+        # Build validation context (injected into every prompt)
+        _val = state.get("validation", [])
+        _summary = state.get("validation_summary", {})
+        _val_lines = []
+        for v in _val:
+            _val_lines.append(
+                "  " + v["field_name"].replace("_", " ").title()
+                + ": " + v["status"].upper()
+                + " | found='" + str(v.get("found_value") or "—") + "'"
+                + " | expected='" + str(v.get("expected_value") or "—") + "'"
+                + " | critical=" + ("YES" if v.get("is_critical") else "no")
+                + " | confidence=" + f"{v.get('confidence', 0):.0%}"
+            )
+        _val_context = "\n".join(_val_lines) if _val_lines else "No validation data."
+        _pipeline_context = (
+            "PIPELINE RESULTS FOR THIS SHIPMENT:\n"
+            + "Decision: " + state.get("decision", "").upper() + "\n"
+            + "Reasoning: " + state.get("reasoning", "") + "\n"
+            + "Summary: "
+            + str(_summary.get("matches", 0)) + " match, "
+            + str(_summary.get("mismatches", 0)) + " mismatch, "
+            + str(_summary.get("missing", 0)) + " missing, "
+            + str(_summary.get("uncertain", 0)) + " uncertain, "
+            + str(_summary.get("not_checked", 0)) + " not_checked\n"
+            + "\nFIELD-BY-FIELD VALIDATION:\n"
+            + _val_context
+        )
+
+        # Chat history
+        if "rag_chat_history" not in st.session_state:
+            st.session_state["rag_chat_history"] = []
+
+        for msg in st.session_state["rag_chat_history"]:
+            with st.chat_message(msg["role"]):
+                st.write(msg["content"])
+
+        rag_q = st.chat_input("Ask about this shipment...", key="rag_chat_input")
+        if rag_q:
+            # Append only — do NOT render inline, history loop does it on rerun
+            st.session_state["rag_chat_history"].append({"role": "user", "content": rag_q})
+
+            from rag.retriever import query_document
+            snippets = query_document(rag_q, shipment_id, n_results=3)
+            doc_context = (
+                "\n\n---\n\n".join(s["text"] for s in snippets)
+                if snippets else "No document snippets available."
+            )
+
+            from llm.client import get_llm
+            llm = get_llm(vision=False)
+
+            full_prompt = (
+                "You are a trade document validation assistant."
+                " Answer questions using the pipeline results and document snippets provided."
+                " For questions about missing/failed/uncertain/not_checked fields, use PIPELINE RESULTS."
+                " For questions about document content (values, addresses, dates), use DOCUMENT SNIPPETS."
+                " Be specific and concise. If the answer is not in either source, say so."
+                "\n\n" + _pipeline_context
+                + "\n\nDOCUMENT SNIPPETS:\n" + doc_context
+                + "\n\nQuestion: " + rag_q
+            )
+
+            try:
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    response = llm.invoke(full_prompt)
+                answer = response.content if hasattr(response, "content") else str(response)
+            except Exception as e:
+                answer = "Error: " + str(e)
+
+            st.session_state["rag_chat_history"].append({"role": "assistant", "content": answer})
+            st.rerun()
+
+        if st.session_state.get("rag_chat_history"):
+            if st.button("🗑️ Clear chat", key="clear_rag_chat"):
+                st.session_state["rag_chat_history"] = []
+                st.rerun()
 
 
 # =====================
@@ -266,7 +350,7 @@ if page == "▶ Run Pipeline":
 elif page == "📊 Shipment History":
     st.title("Shipment History")
 
-    customers = get_all_customers()
+    customers = _get_customers()
     if not customers:
         st.info("No customers yet.")
         st.stop()
@@ -289,7 +373,6 @@ elif page == "📊 Shipment History":
         st.info("No shipments yet. Run the pipeline first.")
         st.stop()
 
-    # Summary metrics
     status_counts = {}
     for s in shipments:
         status_counts[s["status"]] = status_counts.get(s["status"], 0) + 1
@@ -326,7 +409,9 @@ elif page == "❓ Query Layer":
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        query = st.text_input("Ask a question...", placeholder="How many shipments were flagged this week?")
+        # Pre-fill from example button clicks
+        prefill = st.session_state.pop("prefill_query", "")
+        query = st.text_input("Ask a question...", value=prefill, placeholder="How many shipments were flagged this week?")
 
         shipment_id_opt = st.text_input("(Optional) Shipment ID for document-specific questions", "")
 
@@ -361,12 +446,12 @@ elif page == "⚙️ Manage Customers":
     tab1, tab2 = st.tabs(["Existing Customers", "Add New Customer"])
 
     with tab1:
-        customers = get_all_customers()
+        customers = _get_customers()
         if not customers:
             st.info("No customers yet.")
         for c in customers:
             with st.expander(f"**{c['name']}** (`{c['id']}`)"):
-                rules = get_customer_rules(c["id"])
+                rules = _get_rules(c["id"])
                 if rules:
                     rows = []
                     for r in rules:
@@ -377,7 +462,7 @@ elif page == "⚙️ Manage Customers":
                             "Critical": "Yes" if r["is_critical"] else "No",
                             "Description": r.get("description", ""),
                         })
-                    st.dataframe(rows, use_container_width=True, hide_index=True)
+                    st.dataframe(rows, width="stretch", hide_index=True)
                 else:
                     st.info("No rules defined.")
 
@@ -419,6 +504,8 @@ elif page == "⚙️ Manage Customers":
                 upsert_customer_rules(cid, st.session_state.new_rules)
             st.success(f"Customer '{new_name}' created with ID: `{cid}`")
             st.session_state.new_rules = []
+            _get_customers.clear()   # bust cache so new customer appears immediately
+            _get_rules.clear()
             st.rerun()
 
 
@@ -452,7 +539,7 @@ elif page == "📈 Eval":
             }
             for f, v in field_acc.items()
         ]
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
 
     if st.button("▶ Run Eval Now", type="primary"):
         with st.spinner("Running evaluation..."):

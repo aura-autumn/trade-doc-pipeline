@@ -1,0 +1,201 @@
+{
+  "summary": {
+    "total_docs": 2,
+    "successful_runs": 2,
+    "avg_extraction_accuracy": 1.0,
+    "decision_accuracy": 1.0,
+    "avg_latency_seconds": 3.67
+  },
+  "field_accuracy": {
+    "consignee_name": {
+      "accuracy": 1.0,
+      "calibration_issues": 0
+    },
+    "hs_code": {
+      "accuracy": 1.0,
+      "calibration_issues": 0
+    },
+    "port_of_loading": {
+      "accuracy": 1.0,
+      "calibration_issues": 0
+    },
+    "port_of_discharge": {
+      "accuracy": 1.0,
+      "calibration_issues": 0
+    },
+    "incoterms": {
+      "accuracy": 1.0,
+      "calibration_issues": 0
+    },
+    "description_of_goods": {
+      "accuracy": 1.0,
+      "calibration_issues": 0
+    },
+    "gross_weight": {
+      "accuracy": 1.0,
+      "calibration_issues": 0
+    },
+    "invoice_number": {
+      "accuracy": 1.0,
+      "calibration_issues": 0
+    }
+  },
+  "results": [
+    {
+      "doc": "./data/sample_docs/sample_clean.pdf",
+      "doc_type": "clean",
+      "customer_id": "CUST001",
+      "elapsed_seconds": 5.03,
+      "extraction": {
+        "per_field": {
+          "consignee_name": {
+            "expected": "ACME IMPORTS LTD",
+            "found": "ACME IMPORTS LTD",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          },
+          "hs_code": {
+            "expected": "84713000",
+            "found": "84713000",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          },
+          "port_of_loading": {
+            "expected": "SHANGHAI",
+            "found": "SHANGHAI, CHINA",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          },
+          "port_of_discharge": {
+            "expected": "NHAVA SHEVA",
+            "found": "NHAVA SHEVA, INDIA",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          },
+          "incoterms": {
+            "expected": "CIF",
+            "found": "CIF",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          },
+          "description_of_goods": {
+            "expected": "Laptop Computers and Accessories",
+            "found": "Laptop Computers and Accessories",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          },
+          "gross_weight": {
+            "expected": "1250 KGS",
+            "found": "1250 KGS",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          },
+          "invoice_number": {
+            "expected": "INV-2024-001",
+            "found": "INV-2024-001",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          }
+        },
+        "total_fields": 8,
+        "correct": 8,
+        "accuracy": 1.0,
+        "confident_correct": 8,
+        "confident_wrong": 0,
+        "calibration_score": 1.0
+      },
+      "decision": {
+        "expected": "auto_approve",
+        "actual": "auto_approve",
+        "correct": true
+      },
+      "error": ""
+    },
+    {
+      "doc": "./data/sample_docs/sample_mismatch.pdf",
+      "doc_type": "mismatch",
+      "customer_id": "CUST001",
+      "elapsed_seconds": 2.32,
+      "extraction": {
+        "per_field": {
+          "consignee_name": {
+            "expected": "ACME IMPORTS LTD",
+            "found": "ACME IMPORTS LTD",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          },
+          "hs_code": {
+            "expected": "84713000",
+            "found": "84713000",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          },
+          "port_of_loading": {
+            "expected": "SHANGHAI",
+            "found": "SHANGHAI, CHINA",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          },
+          "port_of_discharge": {
+            "expected": "NHAVA SHEVA",
+            "found": "NHAVA SHEVA, INDIA",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          },
+          "incoterms": {
+            "expected": "FOB",
+            "found": "FOB",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          },
+          "description_of_goods": {
+            "expected": "Laptop Computers",
+            "found": "Laptop Computers",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          },
+          "gross_weight": {
+            "expected": "1100 KGS",
+            "found": "1100 KGS",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          },
+          "invoice_number": {
+            "expected": "INV-2024-002",
+            "found": "INV-2024-002",
+            "confidence": 1.0,
+            "correct": true,
+            "calibration_issue": false
+          }
+        },
+        "total_fields": 8,
+        "correct": 8,
+        "accuracy": 1.0,
+        "confident_correct": 8,
+        "confident_wrong": 0,
+        "calibration_score": 1.0
+      },
+      "decision": {
+        "expected": "draft_amendment",
+        "actual": "draft_amendment",
+        "correct": true
+      },
+      "error": ""
+    }
+  ]
+}
