@@ -109,6 +109,7 @@ def node_route(state: PipelineState) -> dict:
             state["validation"],
             shipment_id=state["shipment_id"],
             customer_name=state.get("customer_name", ""),
+            extraction=state.get("extraction", {}),
         )
         save_decision(
             state["shipment_id"],
