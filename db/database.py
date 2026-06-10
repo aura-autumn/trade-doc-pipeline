@@ -2,7 +2,7 @@ import sqlite3
 import os
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -52,232 +52,219 @@ def get_customer(customer_id: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
-# --- Customer Rules ---
+def get_customer_rules(customer_id: str) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM customer_rules WHERE customer_id = ?", (customer_id,)).fetchall()
+    return [dict(r) for r in rows]
 
-def upsert_customer_rules(customer_id: str, rules: list[dict]):
-    """Replace all rules for a customer."""
+
+def upsert_customer_rules(customer_id: str, rules: list[dict]) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM customer_rules WHERE customer_id = ?", (customer_id,))
-        for rule in rules:
+        for r in rules:
             conn.execute(
-                """INSERT INTO customer_rules 
-                   (customer_id, field_name, expected_value, rule_type, is_critical, description)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                """
+                INSERT INTO customer_rules (customer_id, field_name, expected_value, rule_type, is_critical, description)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
                 (
                     customer_id,
-                    rule["field_name"],
-                    rule.get("expected_value"),
-                    rule["rule_type"],
-                    1 if rule.get("is_critical") else 0,
-                    rule.get("description", ""),
+                    r["field_name"],
+                    r.get("expected_value"),
+                    r["rule_type"],
+                    1 if r.get("is_critical") else 0,
+                    r.get("description", "")
                 )
             )
 
 
-def get_customer_rules(customer_id: str) -> list[dict]:
-    with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT * FROM customer_rules WHERE customer_id = ?", (customer_id,)
-        ).fetchall()
-    return [dict(r) for r in rows]
+# --- Shipments & Transaction Documents ---
 
-
-# --- Shipments ---
-
-def create_shipment(customer_id: str, doc_path: str, doc_filename: str) -> str:
-    sid = str(uuid.uuid4())
+def create_shipment(customer_id: str) -> str:
+    """Creates a top-level transaction folder frame."""
+    sid = str(uuid.uuid4())[:8]
     with get_connection() as conn:
         conn.execute(
-            """INSERT INTO shipments (id, customer_id, doc_path, doc_filename, status)
-               VALUES (?, ?, ?, ?, 'processing')""",
-            (sid, customer_id, doc_path, doc_filename)
+            "INSERT INTO shipments (id, customer_id, status) VALUES (?, ?, 'processing')",
+            (sid, customer_id)
         )
     return sid
 
 
-def update_shipment_status(shipment_id: str, status: str):
+def add_document_to_shipment(shipment_id: str, doc_path: str, doc_filename: str, doc_type: str = "unknown") -> str:
+    """Adds an isolated tracked document reference mapping to a transaction."""
+    did = str(uuid.uuid4())[:8]
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) as cnt FROM shipment_documents 
+            WHERE shipment_id = ? AND doc_filename = ?
+            """,
+            (shipment_id, doc_filename)
+        )
+        version = row.fetchone()["cnt"] + 1
+
+        conn.execute(
+            """
+            INSERT INTO shipment_documents (id, shipment_id, doc_path, doc_filename, doc_type, version_number)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (did, shipment_id, doc_path, doc_filename, doc_type, version)
+        )
+    return did
+
+
+def get_shipment_documents(shipment_id: str) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM shipment_documents WHERE shipment_id = ?", (shipment_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_shipment_status(shipment_id: str, status: str) -> None:
     with get_connection() as conn:
         conn.execute(
-            "UPDATE shipments SET status = ?, updated_at = ? WHERE id = ?",
-            (status, datetime.now(), shipment_id)
+            "UPDATE shipments SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (status, shipment_id)
         )
-
-
-def get_shipment(shipment_id: str) -> Optional[dict]:
-    with get_connection() as conn:
-        row = conn.execute("SELECT * FROM shipments WHERE id = ?", (shipment_id,)).fetchone()
-    return dict(row) if row else None
 
 
 def get_shipments_by_customer(customer_id: str) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT * FROM shipments WHERE customer_id = ? ORDER BY created_at DESC",
+            """
+            SELECT s.*, 
+                   (SELECT doc_filename FROM shipment_documents WHERE shipment_id = s.id ORDER BY uploaded_at ASC LIMIT 1) as doc_filename
+            FROM shipments s 
+            WHERE s.customer_id = ? 
+            ORDER BY s.created_at DESC
+            """, 
             (customer_id,)
         ).fetchall()
     return [dict(r) for r in rows]
 
 
-# --- Extraction Results ---
+# --- Operations Writes & Reads ---
 
-def save_extraction_results(shipment_id: str, extraction: dict):
-    """extraction: {field_name: {value, confidence, method}}"""
+def save_extraction_results(shipment_id: str, document_id: Optional[str], extraction: dict) -> None:
     with get_connection() as conn:
-        conn.execute("DELETE FROM extraction_results WHERE shipment_id = ?", (shipment_id,))
-        for field_name, data in extraction.items():
+        for field, data in extraction.items():
             conn.execute(
-                """INSERT INTO extraction_results 
-                   (shipment_id, field_name, field_value, confidence, extraction_method)
-                   VALUES (?, ?, ?, ?, ?)""",
+                """
+                INSERT INTO extraction_results (shipment_id, document_id, field_name, field_value, confidence, extraction_method)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
                 (
                     shipment_id,
-                    field_name,
-                    str(data.get("value", "")),
-                    float(data.get("confidence", 0.0)),
-                    data.get("method", "llm"),
+                    document_id,
+                    field,
+                    str(data.get("value") or ""),
+                    float(data.get("confidence", 1.0)),
+                    data.get("method", "llm")
                 )
             )
 
 
-def get_extraction_results(shipment_id: str) -> list[dict]:
+def save_validation_results(shipment_id: str, document_id: Optional[str], validation: list[dict]) -> None:
     with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT * FROM extraction_results WHERE shipment_id = ?", (shipment_id,)
-        ).fetchall()
-    return [dict(r) for r in rows]
-
-
-# --- Validation Results ---
-
-def save_validation_results(shipment_id: str, validation: list[dict]):
-    with get_connection() as conn:
-        conn.execute("DELETE FROM validation_results WHERE shipment_id = ?", (shipment_id,))
         for v in validation:
             conn.execute(
-                """INSERT INTO validation_results
-                   (shipment_id, field_name, status, found_value, expected_value, rule_type, is_critical)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                """
+                INSERT INTO validation_results (shipment_id, document_id, field_name, status, found_value, expected_value, rule_type, is_critical, detail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
                 (
                     shipment_id,
+                    document_id,
                     v["field_name"],
                     v["status"],
-                    v.get("found_value", ""),
-                    v.get("expected_value", ""),
-                    v.get("rule_type", ""),
+                    str(v.get("found_value") or ""),
+                    str(v.get("expected_value") or ""),
+                    v.get("rule_type"),
                     1 if v.get("is_critical") else 0,
+                    v.get("detail", "")
                 )
             )
 
 
-def get_validation_results(shipment_id: str) -> list[dict]:
-    with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT * FROM validation_results WHERE shipment_id = ?", (shipment_id,)
-        ).fetchall()
-    return [dict(r) for r in rows]
-
-
-# --- Decisions ---
-
-def save_decision(shipment_id: str, decision: str, reasoning: str, draft_email: Optional[str] = None):
+def save_decision(shipment_id: str, decision: str, reasoning: str, draft_email: Optional[str] = None) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM decisions WHERE shipment_id = ?", (shipment_id,))
         conn.execute(
-            """INSERT INTO decisions (shipment_id, decision, reasoning, draft_email)
-               VALUES (?, ?, ?, ?)""",
+            """
+            INSERT INTO decisions (shipment_id, decision, reasoning, draft_email)
+            VALUES (?, ?, ?, ?)
+            """,
             (shipment_id, decision, reasoning, draft_email)
         )
 
 
+def get_extraction_results(shipment_id: str) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM extraction_results WHERE shipment_id = ?", (shipment_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_validation_results(shipment_id: str) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM validation_results WHERE shipment_id = ?", (shipment_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_decision(shipment_id: str) -> Optional[dict]:
     with get_connection() as conn:
-        row = conn.execute(
-            "SELECT * FROM decisions WHERE shipment_id = ?", (shipment_id,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM decisions WHERE shipment_id = ?", (shipment_id,)).fetchone()
     return dict(row) if row else None
 
 
-# --- Query helpers for NL layer ---
-
-def run_raw_query(sql: str) -> list[dict]:
-    """Run arbitrary read-only SQL. Used by the NL query layer."""
-    if any(kw in sql.upper() for kw in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER"]):
-        raise ValueError("Only SELECT queries are allowed")
+def run_raw_query(sql: str, params: tuple = ()) -> list[dict]:
     with get_connection() as conn:
-        rows = conn.execute(sql).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
 
 
 def get_schema_description() -> str:
-    """Return schema as string for LLM context in Text-to-SQL."""
-    return """
-Tables:
-- customers(id, name, created_at)
-- customer_rules(id, customer_id, field_name, expected_value, rule_type, is_critical, description)
-- shipments(id, customer_id, doc_path, doc_filename, status, created_at, updated_at)
-  status values: processing | approved | flagged | amendment_drafted | error
-- extraction_results(id, shipment_id, field_name, field_value, confidence, extraction_method)
-- validation_results(id, shipment_id, field_name, status, found_value, expected_value, rule_type, is_critical)
-  status values: match | mismatch | uncertain | not_checked | missing
-- decisions(id, shipment_id, decision, reasoning, draft_email, created_at)
-  decision values: auto_approve | flag_for_review | draft_amendment
+    schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
+    if os.path.exists(schema_path):
+        with open(schema_path) as f:
+            return f.read()
+    return ""
 
-Relationships:
-- shipments.customer_id -> customers.id
-- extraction_results.shipment_id -> shipments.id
-- validation_results.shipment_id -> shipments.id
-- decisions.shipment_id -> shipments.id
-- customer_rules.customer_id -> customers.id
-"""
-
-
-# --- Seed data ---
 
 def seed_demo_customers():
-    """Seed 5-6 demo customers with rules for testing."""
     customers = [
         {
             "id": "CUST001",
-            "name": "Acme Imports Ltd",
+            "name": "Global Freight Corp",
             "rules": [
-                {"field_name": "incoterms", "expected_value": "CIF", "rule_type": "exact", "is_critical": True, "description": "Incoterms must be CIF"},
-                {"field_name": "consignee_name", "expected_value": "ACME IMPORTS LTD", "rule_type": "contains", "is_critical": True, "description": "Consignee must contain company name"},
-                {"field_name": "port_of_discharge", "expected_value": "NHAVA SHEVA", "rule_type": "contains", "is_critical": False, "description": "Discharge port must be Nhava Sheva"},
-                {"field_name": "hs_code", "expected_value": "^8471", "rule_type": "regex", "is_critical": True, "description": "HS code must start with 8471"},
-                {"field_name": "invoice_number", "expected_value": None, "rule_type": "not_null", "is_critical": True, "description": "Invoice number must be present"},
-                {"field_name": "gross_weight", "expected_value": None, "rule_type": "not_null", "is_critical": False, "description": "Gross weight must be present"},
+                {"field_name": "incoterms", "expected_value": "CIF", "rule_type": "exact", "is_critical": True, "description": "Must be exactly CIF"},
+                {"field_name": "port_of_loading", "expected_value": "SHANGHAI", "rule_type": "contains", "is_critical": True, "description": "Must ship from Shanghai port"},
+                {"field_name": "hs_code", "expected_value": None, "rule_type": "not_null", "is_critical": False, "description": "HS Code required for customs clearance"},
+                {"field_name": "gross_weight", "expected_value": None, "rule_type": "not_null", "is_critical": True, "description": "Weight mandatory parameter"},
             ]
         },
         {
             "id": "CUST002",
-            "name": "Global Tech Distributors",
+            "name": "Apex Logistics LLC",
             "rules": [
-                {"field_name": "incoterms", "expected_value": "FOB", "rule_type": "exact", "is_critical": True, "description": "Incoterms must be FOB"},
-                {"field_name": "port_of_loading", "expected_value": "SHANGHAI", "rule_type": "contains", "is_critical": False, "description": "Loading port must be Shanghai"},
-                {"field_name": "hs_code", "expected_value": "^8542", "rule_type": "regex", "is_critical": True, "description": "HS code must start with 8542 (semiconductors)"},
-                {"field_name": "consignee_name", "expected_value": "GLOBAL TECH", "rule_type": "contains", "is_critical": True, "description": "Consignee must contain Global Tech"},
-                {"field_name": "invoice_number", "expected_value": None, "rule_type": "not_null", "is_critical": True, "description": "Invoice number required"},
+                {"field_name": "incoterms", "expected_value": "FOB|EXW", "rule_type": "regex", "is_critical": True, "description": "FOB or EXW shipping standard rules"},
+                {"field_name": "consignee_name", "expected_value": "APEX LOGISTICS", "rule_type": "contains", "is_critical": True, "description": "Consignee identifier check"},
+                {"field_name": "invoice_number", "expected_value": None, "rule_type": "not_null", "is_critical": False, "description": "Invoice mapping metadata track"},
             ]
         },
         {
             "id": "CUST003",
-            "name": "MediSupply Chain Co",
+            "name": "Zenith Trading",
             "rules": [
-                {"field_name": "incoterms", "expected_value": "DDP", "rule_type": "exact", "is_critical": True, "description": "Incoterms must be DDP for medical goods"},
-                {"field_name": "hs_code", "expected_value": "^3004", "rule_type": "regex", "is_critical": True, "description": "HS code must start with 3004 (pharmaceuticals)"},
-                {"field_name": "consignee_name", "expected_value": "MEDISUPPLY", "rule_type": "contains", "is_critical": True, "description": "Consignee must match"},
-                {"field_name": "port_of_discharge", "expected_value": "MUMBAI", "rule_type": "contains", "is_critical": False, "description": "Discharge must be Mumbai"},
-                {"field_name": "description_of_goods", "expected_value": None, "rule_type": "not_null", "is_critical": True, "description": "Goods description mandatory"},
-                {"field_name": "invoice_number", "expected_value": None, "rule_type": "not_null", "is_critical": True, "description": "Invoice number required"},
+                {"field_name": "incoterms", "expected_value": "FOB", "rule_type": "exact", "is_critical": True, "description": "Incoterms must be FOB"},
+                {"field_name": "port_of_discharge", "expected_value": "ROTTERDAM", "rule_type": "contains", "is_critical": True, "description": "Discharge port must be Rotterdam"},
+                {"field_name": "gross_weight", "expected_value": None, "rule_type": "not_null", "is_critical": True, "description": "Gross weight required"},
             ]
         },
         {
             "id": "CUST004",
-            "name": "FastFashion Retail",
+            "name": "Oceanic Ventures",
             "rules": [
-                {"field_name": "incoterms", "expected_value": "CFR", "rule_type": "exact", "is_critical": False, "description": "Incoterms should be CFR"},
-                {"field_name": "hs_code", "expected_value": "^6109", "rule_type": "regex", "is_critical": True, "description": "HS code must start with 6109 (apparel)"},
-                {"field_name": "port_of_discharge", "expected_value": "CHENNAI", "rule_type": "contains", "is_critical": False, "description": "Discharge port Chennai"},
+                {"field_name": "incoterms", "expected_value": "DDP|DAP", "rule_type": "regex", "is_critical": True, "description": "DDP or DAP required"},
                 {"field_name": "gross_weight", "expected_value": None, "rule_type": "not_null", "is_critical": False, "description": "Weight must be stated"},
                 {"field_name": "invoice_number", "expected_value": None, "rule_type": "not_null", "is_critical": True, "description": "Invoice number required"},
             ]
@@ -298,9 +285,4 @@ def seed_demo_customers():
     for c in customers:
         create_customer(c["name"], c["id"])
         upsert_customer_rules(c["id"], c["rules"])
-        print(f"Seeded customer: {c['name']} ({c['id']}) with {len(c['rules'])} rules")
-
-
-if __name__ == "__main__":
-    init_db()
-    seed_demo_customers()
+    print("Demo customers seeded successfully.")

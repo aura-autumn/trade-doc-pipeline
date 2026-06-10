@@ -134,9 +134,106 @@ def generate_with_fpdf():
         return False
 
 
+def generate_multi_transaction_batch():
+    """Generate a batch of related documents simulating a multi-transaction pipeline."""
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.units import cm
+
+        def make_doc(filename, fields):
+            c = canvas.Canvas(filename, pagesize=A4)
+            width, height = A4
+            c.setFont("Helvetica-Bold", 16)
+            c.drawString(2*cm, height - 2*cm, "COMMERCIAL INVOICE")
+            c.setFont("Helvetica", 10)
+            y = height - 3.5*cm
+            for label, value in fields.items():
+                c.setFont("Helvetica-Bold", 9)
+                c.drawString(2*cm, y, f"{label}:")
+                c.setFont("Helvetica", 9)
+                c.drawString(7*cm, y, str(value))
+                y -= 0.7*cm
+            c.save()
+            print(f"Generated: {filename}")
+
+        # Transaction Batch 1 (3 related shipments)
+        os.makedirs("./data/sample_docs/batch_001", exist_ok=True)
+        make_doc("./data/sample_docs/batch_001/invoice_A.pdf", {
+            "Invoice Number": "INV-2024-BATCH001-A",
+            "Consignee Name": "ACME IMPORTS LTD",
+            "HS Code": "84713000",
+            "Port of Loading": "SHANGHAI, CHINA",
+            "Port of Discharge": "NHAVA SHEVA, INDIA",
+            "Incoterms": "CIF",
+            "Description of Goods": "Laptops - Shipment A",
+            "Gross Weight": "500 KGS",
+            "Total Value": "USD 15,000",
+        })
+
+        make_doc("./data/sample_docs/batch_001/invoice_B.pdf", {
+            "Invoice Number": "INV-2024-BATCH001-B",
+            "Consignee Name": "ACME IMPORTS LTD",
+            "HS Code": "84713000",
+            "Port of Loading": "SHANGHAI, CHINA",
+            "Port of Discharge": "NHAVA SHEVA, INDIA",
+            "Incoterms": "CIF",
+            "Description of Goods": "Laptops - Shipment B",
+            "Gross Weight": "450 KGS",
+            "Total Value": "USD 13,500",
+        })
+
+        make_doc("./data/sample_docs/batch_001/invoice_C.pdf", {
+            "Invoice Number": "INV-2024-BATCH001-C",
+            "Consignee Name": "ACME IMPORTS LTD",
+            "HS Code": "84713000",
+            "Port of Loading": "SHANGHAI, CHINA",
+            "Port of Discharge": "NHAVA SHEVA, INDIA",
+            "Incoterms": "CIF",
+            "Description of Goods": "Laptops - Shipment C",
+            "Gross Weight": "300 KGS",
+            "Total Value": "USD 9,000",
+        })
+
+        # Transaction Batch 2 (mixed quality — testing error handling)
+        os.makedirs("./data/sample_docs/batch_002", exist_ok=True)
+        make_doc("./data/sample_docs/batch_002/invoice_good.pdf", {
+            "Invoice Number": "INV-2024-BATCH002-GOOD",
+            "Consignee Name": "GLOBAL TRADE CORP",
+            "HS Code": "87042190",
+            "Port of Loading": "HONG KONG",
+            "Port of Discharge": "PORT SAID, EGYPT",
+            "Incoterms": "CIF",
+            "Description of Goods": "Auto Parts",
+            "Gross Weight": "2000 KGS",
+            "Total Value": "USD 55,000",
+        })
+
+        make_doc("./data/sample_docs/batch_002/invoice_mismatch.pdf", {
+            "Invoice Number": "INV-2024-BATCH002-ERR",
+            "Consignee Name": "GLOBAL TRADE CORP",
+            "HS Code": "87042190",
+            "Port of Loading": "HONG KONG",
+            "Port of Discharge": "SINGAPORE",  # Different discharge port
+            "Incoterms": "FOB",  # Wrong incoterms
+            "Description of Goods": "Auto Parts",
+            "Gross Weight": "1800 KGS",
+            "Total Value": "USD 48,000",
+        })
+
+        print("\nMulti-transaction batches generated in ./data/sample_docs/batch_*/")
+        return True
+
+    except ImportError:
+        return False
+
+
 if __name__ == "__main__":
     if not generate_with_reportlab():
         if not generate_with_fpdf():
             print("Neither reportlab nor fpdf available.")
             print("Install one: pip install reportlab  OR  pip install fpdf2")
-            print("Or add your own PDFs to ./data/sample_docs/")
+        else:
+            generate_multi_transaction_batch()
+    else:
+        generate_multi_transaction_batch()

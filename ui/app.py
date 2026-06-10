@@ -117,7 +117,7 @@ st.sidebar.caption(f"LLM: `{os.getenv('LLM_PROVIDER', 'gemini').upper()}`")
 # =====================
 if page == "▶ Run Pipeline":
     st.title("Run Pipeline")
-    st.caption("Upload a trade document. Select a customer. Pipeline runs extract → validate → decide.")
+    st.caption("Upload one or more trade documents (BOL, Invoice, Packing List). Select a customer. Pipeline extracts, validates, and decides across all docs.")
 
     col1, col2 = st.columns([1, 1])
 
@@ -131,12 +131,16 @@ if page == "▶ Run Pipeline":
         selected_name = st.selectbox("Customer", list(customer_options.keys()))
         selected_customer_id = customer_options[selected_name]
 
-        uploaded_file = st.file_uploader(
-            "Trade Document (PDF or Image)",
+        uploaded_files = st.file_uploader(
+            "Trade Documents (PDF or Image) — upload multiple for cross-doc validation",
             type=["pdf", "jpg", "jpeg", "png", "webp"],
+            accept_multiple_files=True,
         )
 
-        run_btn = st.button("▶ Run Pipeline", type="primary", disabled=not uploaded_file)
+        if uploaded_files:
+            st.caption(f"{len(uploaded_files)} file(s) selected: " + ", ".join(f"**{f.name}**" for f in uploaded_files))
+
+        run_btn = st.button("▶ Run Pipeline", type="primary", disabled=not uploaded_files)
 
     with col2:
         if selected_customer_id:
@@ -149,53 +153,56 @@ if page == "▶ Run Pipeline":
 
     st.divider()
 
-    if run_btn and uploaded_file:
-        # Save uploaded file to temp
-        suffix = Path(uploaded_file.name).suffix
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(uploaded_file.read())
-            tmp_path = tmp.name
+    if run_btn and uploaded_files:
+        # Save all uploaded files to temp paths
+        tmp_docs = []
+        for uf in uploaded_files:
+            suffix = Path(uf.name).suffix
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(uf.read())
+                tmp_docs.append((tmp.name, uf.name))
 
-        st.info(f"Processing: **{uploaded_file.name}**")
+        doc_names = ", ".join(f"**{f}**" for _, f in tmp_docs)
+        st.info(f"Processing {len(tmp_docs)} document(s): {doc_names}")
 
         progress = st.progress(0, text="Starting pipeline...")
-        status_placeholder = st.empty()
 
         with st.spinner("Running pipeline..."):
             try:
-                progress.progress(10, text="📄 Extracting fields from document...")
-                status_placeholder.caption("Extractor Agent: Analyzing document with vision LLM...")
+                n = len(tmp_docs)
+                for i, (_, fname) in enumerate(tmp_docs):
+                    pct = int(10 + (i / n) * 40)
+                    progress.progress(pct, text=f"📄 Extracting: {fname} ({i+1}/{n})...")
 
                 start = time.time()
-                final_state = run_pipeline(tmp_path, selected_customer_id, uploaded_file.name)
+                final_state = run_pipeline(tmp_docs, selected_customer_id)
                 elapsed = time.time() - start
 
-                progress.progress(60, text="✅ Extraction complete. Validating...")
-                time.sleep(0.3)
-                progress.progress(80, text="🔍 Validation complete. Routing...")
+                progress.progress(80, text="🔍 Validating + cross-doc check...")
                 time.sleep(0.3)
                 progress.progress(100, text="✅ Pipeline complete!")
 
-                # Index for RAG — errors here are non-fatal
+                # Index first doc for RAG — non-fatal
                 try:
-                    index_document(tmp_path, final_state["shipment_id"])
+                    index_document(tmp_docs[0][0], final_state["shipment_id"])
                 except Exception as rag_err:
                     st.session_state["rag_index_error"] = str(rag_err)
 
                 st.session_state["last_state"] = final_state
                 st.session_state["last_shipment_id"] = final_state["shipment_id"]
-                # Clear stale state from previous run
                 st.session_state.pop("rag_index_error", None)
-                st.session_state["rag_chat_history"] = []  # fresh chat for new shipment
+                st.session_state["rag_chat_history"] = []
 
             except Exception as e:
+                import traceback
                 st.error(f"Pipeline failed: {e}")
+                st.code(traceback.format_exc())
                 st.stop()
 
-        st.success(f"Pipeline completed in {elapsed:.1f}s")
+        st.success(f"Pipeline completed in {elapsed:.1f}s — {len(tmp_docs)} doc(s) processed")
 
         if "rag_index_error" in st.session_state:
-            st.warning(f"RAG indexing skipped (install `onnxruntime` to enable): {st.session_state['rag_index_error']}")
+            st.warning(f"RAG indexing skipped: {st.session_state['rag_index_error']}")
 
     # Show results
     if "last_state" in st.session_state:
@@ -213,26 +220,48 @@ if page == "▶ Run Pipeline":
         tab1, tab2, tab3 = st.tabs(["📋 Extraction", "🔍 Validation", "📝 Draft Email"])
 
         with tab1:
-            extraction = state.get("extraction", {})
+            extraction = state.get("extraction", {})  # {filename: {field: {value,confidence}}}
             if extraction:
-                rows = []
-                for field, data in extraction.items():
-                    conf = data.get("confidence", 0.0)
-                    rows.append({
-                        "Field": field.replace("_", " ").title(),
-                        "Value": data.get("value") or "—",
-                        "Confidence": f"{confidence_color(conf)} {conf:.0%}",
-                        "Method": data.get("method", "llm").upper(),
-                    })
-                st.dataframe(rows, width="stretch", hide_index=True)
+                doc_names = list(extraction.keys())
+                if len(doc_names) == 1:
+                    # Single doc — flat table
+                    rows = []
+                    for field, data in extraction[doc_names[0]].items():
+                        conf = data.get("confidence", 0.0)
+                        rows.append({
+                            "Field": field.replace("_", " ").title(),
+                            "Value": data.get("value") or "—",
+                            "Confidence": f"{confidence_color(conf)} {conf:.0%}",
+                            "Method": data.get("method", "llm").upper(),
+                        })
+                    st.dataframe(rows, width="stretch", hide_index=True)
+                else:
+                    # Multi-doc — one tab per document
+                    doc_tabs = st.tabs([f"📄 {n}" for n in doc_names])
+                    for dt, dname in zip(doc_tabs, doc_names):
+                        with dt:
+                            rows = []
+                            for field, data in extraction[dname].items():
+                                conf = data.get("confidence", 0.0)
+                                rows.append({
+                                    "Field": field.replace("_", " ").title(),
+                                    "Value": data.get("value") or "—",
+                                    "Confidence": f"{confidence_color(conf)} {conf:.0%}",
+                                    "Method": data.get("method", "llm").upper(),
+                                })
+                            st.dataframe(rows, width="stretch", hide_index=True)
             else:
                 st.warning("No extraction data.")
 
         with tab2:
             validation = state.get("validation", [])
             if validation:
+                # Separate per-doc results from cross-doc discrepancies
+                cross_doc = [v for v in validation if v.get("field_name", "").startswith("cross_doc_")]
+                per_doc   = [v for v in validation if not v.get("field_name", "").startswith("cross_doc_")]
+
                 rows = []
-                for v in validation:
+                for v in per_doc:
                     rows.append({
                         "Field": v["field_name"].replace("_", " ").title(),
                         "Status": status_badge(v["status"]),
@@ -243,6 +272,12 @@ if page == "▶ Run Pipeline":
                         "Detail": v.get("detail", ""),
                     })
                 st.dataframe(rows, width="stretch", hide_index=True)
+
+                if cross_doc:
+                    st.warning(f"⚠️ {len(cross_doc)} cross-document discrepancy(s) found:")
+                    for v in cross_doc:
+                        field_clean = v["field_name"].replace("cross_doc_discrepancy_", "").replace("_", " ").title()
+                        st.error(f"**{field_clean}** — values differ across documents: {v.get('found_value')}")
             else:
                 st.warning("No validation data.")
 
@@ -364,9 +399,14 @@ elif page == "📊 Shipment History":
     else:
         from db.database import get_connection
         with get_connection() as conn:
-            rows = conn.execute(
-                "SELECT s.*, c.name as customer_name FROM shipments s JOIN customers c ON s.customer_id = c.id ORDER BY s.created_at DESC LIMIT 100"
-            ).fetchall()
+            rows = conn.execute("""
+                SELECT s.*, c.name as customer_name,
+                    (SELECT GROUP_CONCAT(sd.doc_filename, ', ')
+                     FROM shipment_documents sd WHERE sd.shipment_id = s.id) as doc_filename
+                FROM shipments s
+                JOIN customers c ON s.customer_id = c.id
+                ORDER BY s.created_at DESC LIMIT 100
+            """).fetchall()
         shipments = [dict(r) for r in rows]
 
     if not shipments:
@@ -384,7 +424,8 @@ elif page == "📊 Shipment History":
     st.divider()
 
     for s in shipments:
-        with st.expander(f"📄 {s['doc_filename']} — {s.get('customer_name', s['customer_id'])} — {s['status'].upper()} — {s['created_at'][:16]}"):
+        doc_label = s.get("doc_filename") or "Unknown document"
+        with st.expander(f"📄 {doc_label} — {s.get('customer_name', s['customer_id'])} — {s['status'].upper()} — {s['created_at'][:16]}"):
             decision = get_decision(s["id"])
             if decision:
                 st.write(f"**Decision:** {decision_label(decision['decision'])}")
@@ -418,7 +459,12 @@ elif page == "❓ Query Layer":
         if st.button("Ask", type="primary") and query:
             with st.spinner("Thinking..."):
                 result = run_nl_query(query, shipment_id=shipment_id_opt or None)
+            st.session_state["nl_result"] = result
+            st.session_state["nl_question"] = query
 
+        if "nl_result" in st.session_state:
+            result = st.session_state["nl_result"]
+            st.caption(f"Q: *{st.session_state.get('nl_question', '')}*")
             st.write(f"**Answer:** {result['answer']}")
 
             if result.get("sql"):
