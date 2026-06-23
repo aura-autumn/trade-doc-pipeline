@@ -12,8 +12,11 @@ from dotenv import load_dotenv
 
 from llm.client import get_llm
 from agents.validator import get_validation_summary
+from core.logging_config import get_logger
 
 load_dotenv()
+
+log = get_logger(__name__)
 
 
 def _decide_routing(summary: dict) -> str:
@@ -170,7 +173,7 @@ def run_router(
         draft_email = llm_output.get("draft_email", "")
 
     except Exception as e:
-        print(f"Router LLM call failed: {e}. Using fallback reasoning.")
+        log.warning("Router LLM call failed: %s. Using deterministic fallback reasoning/email.", e)
         reasoning   = _fallback_reasoning(decision, summary)
         draft_email = _fallback_email(decision, validation_results, summary, customer_name, extraction)
 

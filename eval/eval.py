@@ -11,10 +11,13 @@ import time
 from pathlib import Path
 from dotenv import load_dotenv
 
+from core.paths import resolve_data_path
+
 load_dotenv()
 
 
-GROUND_TRUTH_PATH = "./data/ground_truth.json"
+GROUND_TRUTH_PATH = resolve_data_path("./data/ground_truth.json")
+REPORT_PATH = resolve_data_path("./data/eval_report.json")
 
 
 def load_ground_truth() -> list[dict]:
@@ -139,7 +142,9 @@ def run_eval(test_cases: list[dict] = None) -> dict:
     if test_cases is None:
         test_cases = load_ground_truth()
 
-    # Filter to existing docs only
+    # Anchor relative doc paths to the project root, then keep only existing docs.
+    for tc in test_cases:
+        tc["doc_path"] = resolve_data_path(tc["doc_path"])
     test_cases = [tc for tc in test_cases if os.path.exists(tc["doc_path"])]
 
     if not test_cases:
@@ -252,10 +257,9 @@ def run_eval(test_cases: list[dict] = None) -> dict:
         print(f"  {field:<30} {stats['accuracy']:.0%}{calib}")
 
     # Save report
-    report_path = "./data/eval_report.json"
-    with open(report_path, "w") as f:
+    with open(REPORT_PATH, "w") as f:
         json.dump(report, f, indent=2, default=str)
-    print(f"\nFull report saved: {report_path}")
+    print(f"\nFull report saved: {REPORT_PATH}")
 
     return report
 

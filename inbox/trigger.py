@@ -17,7 +17,6 @@ import sys
 import json
 import time
 import shutil
-import traceback
 from pathlib import Path
 from datetime import datetime
 
@@ -26,6 +25,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pipeline.graph import run_pipeline
 from db.database import init_db
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
 
 WATCH_DIR   = Path(__file__).parent / "incoming"
 DONE_DIR    = Path(__file__).parent / "processed"
@@ -41,7 +43,7 @@ def process_email(email_path: Path) -> dict:
     with open(email_path) as f:
         email = json.load(f)
 
-    print(f"\n[Trigger] New email from '{email.get('from', '?')}': {email.get('subject', '?')}")
+    log.info("New email from '%s': %s", email.get("from", "?"), email.get("subject", "?"))
 
     attachments = email.get("attachments", [])
     if not attachments:
@@ -59,9 +61,16 @@ def process_email(email_path: Path) -> dict:
         docs.append((str(att_path), att_path.name))
 
     customer_id = email.get("customer_id", "CUST001")
-    print(f"[Trigger] Running pipeline: {len(docs)} doc(s) for customer {customer_id}")
+    log.info("Running pipeline: %d doc(s) for customer %s", len(docs), customer_id)
 
     result = run_pipeline(docs, customer_id)
+
+    # Index all docs for RAG so document-content questions work for folder-fed shipments too.
+    try:
+        from rag.retriever import index_documents
+        index_documents([p for p, _ in docs], result.get("shipment_id", ""))
+    except Exception as rag_err:
+        log.warning("RAG indexing skipped for shipment %s: %s", result.get("shipment_id"), rag_err)
 
     # Attach email metadata to result
     result["email_from"]    = email.get("from", "unknown@supplier.com")
@@ -75,15 +84,15 @@ def process_email(email_path: Path) -> dict:
     with open(result_file, "w") as f:
         json.dump(result, f, indent=2, default=str)
 
-    print(f"[Trigger] ✅ Shipment {result['shipment_id']} → {result['decision'].upper()}")
+    log.info("Shipment %s -> %s", result["shipment_id"], result["decision"].upper())
     return result
 
 
 def watch_inbox(poll_interval: float = 2.0):
     """Poll the incoming folder and process any new .json email files."""
     init_db()
-    print(f"[Trigger] Watching {WATCH_DIR} for incoming SU emails...")
-    print(f"[Trigger] Drop a .json email file into {WATCH_DIR} to trigger the pipeline.\n")
+    log.info("Watching %s for incoming SU emails...", WATCH_DIR)
+    log.info("Drop a .json email file into %s to trigger the pipeline.", WATCH_DIR)
 
     seen = set()
 
@@ -94,12 +103,11 @@ def watch_inbox(poll_interval: float = 2.0):
             seen.add(email_file.name)
 
             try:
-                result = process_email(email_file)
+                process_email(email_file)
                 shutil.move(str(email_file), str(DONE_DIR / email_file.name))
-                print(f"[Trigger] Moved to processed/: {email_file.name}")
+                log.info("Moved to processed/: %s", email_file.name)
             except Exception as e:
-                print(f"[Trigger] ❌ Failed to process {email_file.name}: {e}")
-                traceback.print_exc()
+                log.error("Failed to process %s: %s", email_file.name, e, exc_info=True)
                 shutil.move(str(email_file), str(FAILED_DIR / email_file.name))
 
         time.sleep(poll_interval)

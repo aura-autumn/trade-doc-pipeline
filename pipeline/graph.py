@@ -23,8 +23,11 @@ from db.database import (
     get_customer_rules,
     init_db,
 )
+from core.logging_config import get_logger
 
 load_dotenv()
+
+log = get_logger(__name__)
 
 
 # ── State ────────────────────────────────────────────────────────────────────
@@ -53,7 +56,7 @@ def node_extract(state: PipelineState) -> dict:
     and so single-doc callers can still trigger extraction here if needed.
     """
     if state.get("extraction"):
-        print(f"[Extractor] Pre-populated extraction for {len(state['extraction'])} doc(s) — skipping re-extract.")
+        log.info("Pre-populated extraction for %d doc(s) — skipping re-extract.", len(state["extraction"]))
         return {"current_node": "extract"}
 
     # Fallback: single doc extraction (backward compat)
@@ -72,7 +75,7 @@ def node_extract(state: PipelineState) -> dict:
 
 def node_validate(state: PipelineState) -> dict:
     """Validate all extracted fields against customer rules + cross-doc reconciliation."""
-    print(f"[Validator] Validating {len(state['extraction'])} doc(s) for shipment {state['shipment_id']}")
+    log.info("Validating %d doc(s) for shipment %s", len(state["extraction"]), state["shipment_id"])
     rules = get_customer_rules(state["customer_id"])
     validation_results = run_validator(state["extraction"], rules)
     summary = get_validation_summary(validation_results)
@@ -91,7 +94,7 @@ def node_validate(state: PipelineState) -> dict:
 
 def node_route(state: PipelineState) -> dict:
     """Decide: auto_approve | flag_for_review | draft_amendment."""
-    print(f"[Router] Deciding for shipment {state['shipment_id']}")
+    log.info("Routing decision for shipment %s", state["shipment_id"])
     # Flatten extraction for router context (highest confidence per field wins)
     flat = {}
     for fields in state["extraction"].values():
@@ -148,7 +151,7 @@ def run_pipeline(
         raise ValueError(f"Customer not found: {customer_id}")
 
     shipment_id = create_shipment(customer_id)
-    print(f"[Pipeline] Shipment {shipment_id} | {len(docs)} doc(s)")
+    log.info("Pipeline start | shipment %s | customer %s | %d doc(s)", shipment_id, customer_id, len(docs))
 
     # Register all docs, run extractor on each, build extraction map
     from agents.extractor import run_extractor
@@ -158,7 +161,7 @@ def run_pipeline(
     for doc_path, doc_filename in docs:
         doc_id = add_document_to_shipment(shipment_id, doc_path, doc_filename)
         doc_id_to_name[doc_id] = doc_filename
-        print(f"[Pipeline] Extracting: {doc_filename}")
+        log.info("Extracting: %s", doc_filename)
         fields = run_extractor(doc_path)
         extraction_map[doc_id] = fields
         save_extraction_results(shipment_id, doc_id, fields)
@@ -180,6 +183,7 @@ def run_pipeline(
 
     config = {"configurable": {"thread_id": shipment_id}}
     final_state = build_pipeline().invoke(initial_state, config=config)
+    log.info("Pipeline done | shipment %s | decision=%s", shipment_id, final_state.get("decision"))
 
     # Build per-filename extraction for UI (keyed by filename, not doc_id)
     extraction_by_filename = {

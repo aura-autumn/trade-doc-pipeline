@@ -30,7 +30,6 @@ import json
 import time
 import base64
 import tempfile
-import traceback
 from pathlib import Path
 from datetime import datetime
 
@@ -45,6 +44,9 @@ sys.path.insert(0, str(ROOT))
 from pipeline.graph import run_pipeline
 from db.database import init_db, get_all_customers
 from inbox.trigger import RESULTS_DIR
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 CREDENTIALS_PATH  = ROOT / os.getenv("GMAIL_CREDENTIALS_PATH", "credentials.json")
@@ -88,7 +90,7 @@ def get_gmail_service():
 
         with open(TOKEN_PATH, "w") as f:
             f.write(creds.to_json())
-        print(f"[Gmail] Token saved to {TOKEN_PATH}")
+        log.info("Gmail token saved to %s", TOKEN_PATH)
 
     return build("gmail", "v1", credentials=creds)
 
@@ -166,7 +168,7 @@ def resolve_customer(sender_email: str, subject: str, mapping: dict) -> str:
         customers = get_all_customers()
         if customers:
             default_id = customers[0]["id"]
-            print(f"[Gmail] ⚠ Could not resolve customer from '{sender_email}' — defaulting to {default_id}")
+            log.warning("Could not resolve customer from '%s' — defaulting to %s", sender_email, default_id)
             return default_id
     except Exception:
         pass
@@ -214,7 +216,7 @@ def download_attachments(service, msg_id: str, payload: dict, tmp_dir: str) -> l
                 with open(tmp_path, "wb") as f:
                     f.write(file_bytes)
                 docs.append((tmp_path, filename))
-                print(f"[Gmail]   Downloaded attachment: {filename} ({len(file_bytes):,} bytes)")
+                log.info("Downloaded attachment: %s (%s bytes)", filename, f"{len(file_bytes):,}")
 
         # Recurse into multipart
         for sub in part.get("parts", []):
@@ -237,13 +239,13 @@ def process_gmail_message(service, msg_id: str, customer_map: dict) -> dict | No
     subject = headers.get("subject", "(no subject)")
     date    = headers.get("date", datetime.utcnow().isoformat())
 
-    print(f"\n[Gmail] 📨 New email: '{subject}' from {sender}")
+    log.info("New email: '%s' from %s", subject, sender)
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         docs = download_attachments(service, msg_id, msg.get("payload", {}), tmp_dir)
 
         if not docs:
-            print(f"[Gmail] ⚠ No valid attachments found — skipping.")
+            log.warning("No valid attachments found in '%s' — skipping.", subject)
             # Still mark as read so we don't reprocess
             if MARK_READ:
                 service.users().messages().modify(
@@ -252,19 +254,19 @@ def process_gmail_message(service, msg_id: str, customer_map: dict) -> dict | No
             return None
 
         customer_id = resolve_customer(sender, subject, customer_map)
-        print(f"[Gmail] Resolved customer: {customer_id} | Docs: {len(docs)}")
+        log.info("Resolved customer: %s | Docs: %d", customer_id, len(docs))
 
         # Run the pipeline (attachments still in tmp_dir at this point)
         result = run_pipeline(docs, customer_id)
 
-        # Index docs for RAG while temp files still exist
+        # Index ALL docs for RAG as one shipment store, while temp files still exist.
+        # (Must happen inside the TemporaryDirectory block — the files are gone after.)
         try:
-            from rag.retriever import index_document
-            for doc_path, doc_name in docs:
-                index_document(doc_path, result.get("shipment_id", ""))
-            print(f"[Gmail] RAG indexed {len(docs)} doc(s) for shipment {result.get('shipment_id')}")
+            from rag.retriever import index_documents
+            index_documents([p for p, _ in docs], result.get("shipment_id", ""))
         except Exception as rag_err:
-            print(f"[Gmail] ⚠ RAG indexing skipped: {rag_err}")
+            log.warning("RAG indexing skipped for shipment %s: %s",
+                        result.get("shipment_id"), rag_err)
 
     # Attach email metadata
     result["email_from"]    = sender
@@ -284,9 +286,9 @@ def process_gmail_message(service, msg_id: str, customer_map: dict) -> dict | No
         service.users().messages().modify(
             userId="me", id=msg_id, body={"removeLabelIds": ["UNREAD"]}
         ).execute()
-        print(f"[Gmail] Marked message {msg_id} as read.")
+        log.info("Marked message %s as read.", msg_id)
 
-    print(f"[Gmail] ✅ Shipment {result['shipment_id']} → {result['decision'].upper()}")
+    log.info("Shipment %s -> %s", result["shipment_id"], result["decision"].upper())
     return result
 
 
@@ -298,17 +300,16 @@ def watch_gmail(poll_interval: float = POLL_INTERVAL):
     Processes each new email through the full pipeline.
     """
     init_db()
-    print(f"[Gmail] Starting Gmail inbox watcher...")
-    print(f"[Gmail] Polling every {poll_interval}s | Label: {WATCH_LABEL}")
+    log.info("Starting Gmail inbox watcher (polling every %ss | label: %s)", poll_interval, WATCH_LABEL)
     if SENDER_FILTER:
-        print(f"[Gmail] Sender filter: {SENDER_FILTER}")
-    print(f"[Gmail] Authenticate once in browser, then runs automatically.\n")
+        log.info("Sender filter: %s", SENDER_FILTER)
+    log.info("Authenticate once in browser, then runs automatically.")
 
     service      = get_gmail_service()
     customer_map = build_sender_customer_map()
     processed    = set()
 
-    print(f"[Gmail] ✅ Authenticated. Watching for new emails...\n")
+    log.info("Authenticated. Watching for new emails...")
 
     while True:
         try:
@@ -332,12 +333,10 @@ def watch_gmail(poll_interval: float = POLL_INTERVAL):
                 try:
                     process_gmail_message(service, msg_id, customer_map)
                 except Exception as e:
-                    print(f"[Gmail] ❌ Failed to process message {msg_id}: {e}")
-                    traceback.print_exc()
+                    log.error("Failed to process message %s: %s", msg_id, e, exc_info=True)
 
         except Exception as e:
-            print(f"[Gmail] ❌ Poll error: {e}")
-            traceback.print_exc()
+            log.error("Gmail poll error: %s", e, exc_info=True)
 
         time.sleep(poll_interval)
 

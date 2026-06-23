@@ -25,9 +25,16 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
 from sklearn.preprocessing import normalize
 
+from core.logging_config import get_logger
+from core.paths import resolve_data_path
+
 load_dotenv()
 
-RAG_STORE     = os.getenv("RAG_STORE_PATH", "./data/rag_store")
+log = get_logger(__name__)
+
+# Anchor to the project root (see core/paths) so the RAG store is shared across
+# every entry point, not tied to the launch directory.
+RAG_STORE     = resolve_data_path(os.getenv("RAG_STORE_PATH", "./data/rag_store"))
 CHUNK_SIZE    = int(os.getenv("RAG_CHUNK_SIZE", 500))
 CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", 100))
 EMB_DIM       = 128   # SVD components — enough for short trade docs, fast to fit
@@ -113,7 +120,7 @@ def _load(shipment_id: str) -> _ShipmentStore | None:
         with open(p, "rb") as f:
             return pickle.load(f)
     except Exception as e:
-        print(f"[RAG] Failed to load store for {shipment_id}: {e}")
+        log.warning("Failed to load RAG store for shipment %s: %s", shipment_id, e)
         return None
 
 
@@ -125,10 +132,10 @@ def _extract_text(doc_path: str) -> str:
     try:
         from agents.extractor import extract_text
         text, method = extract_text(doc_path)
-        print(f"[RAG] Text extracted via {method} ({len(text)} chars)")
+        log.info("RAG text extracted via %s (%d chars) from %s", method, len(text), doc_path)
         return text
     except Exception as e:
-        print(f"[RAG] Text extraction failed: {e}")
+        log.warning("RAG text extraction failed for %s: %s", doc_path, e)
         return ""
 
 
@@ -145,30 +152,50 @@ def _chunk_text(text: str) -> list[str]:
 # PUBLIC API  (same signatures as the old ChromaDB retriever)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def index_document(doc_path: str, shipment_id: str) -> int:
-    """Extract, chunk, embed, and persist a document. Returns chunks indexed."""
-    if _load(shipment_id) is not None:
-        print(f"[RAG] Already indexed for shipment {shipment_id} — skipping")
+def index_documents(doc_paths: list[str], shipment_id: str) -> int:
+    """
+    Extract, chunk, embed, and persist ALL documents of one shipment as a single
+    store. This is the multi-doc-correct entry point: a shipment is one BOL +
+    Invoice + Packing List, and RAG must be able to answer over every page of
+    every attachment — not just the first one.
+
+    The store is (re)built from the union of all docs' chunks so the TF-IDF/SVD
+    space is fitted over the whole shipment. Idempotent re-indexing is fine.
+
+    Returns the total number of chunks indexed.
+    """
+    all_chunks: list[str] = []
+    for doc_path in doc_paths:
+        text = _extract_text(doc_path)
+        if not text.strip():
+            log.warning("No text extracted from %s — skipping for RAG", doc_path)
+            continue
+        all_chunks.extend(_chunk_text(text))
+
+    if not all_chunks:
+        log.warning("No chunks produced for shipment %s — nothing to index", shipment_id)
         return 0
-    text = _extract_text(doc_path)
-    if not text.strip():
-        print(f"[RAG] No text extracted from {doc_path} — skipping")
-        return 0
-    chunks = _chunk_text(text)
-    if not chunks:
-        return 0
+
     store = _ShipmentStore()
-    n = store.build(chunks)
+    n = store.build(all_chunks)
     _save(shipment_id, store)
-    print(f"[RAG] Indexed {n} chunks for shipment {shipment_id}")
+    log.info("Indexed %d chunks from %d doc(s) for shipment %s", n, len(doc_paths), shipment_id)
     return n
 
 
+def index_document(doc_path: str, shipment_id: str) -> int:
+    """
+    Single-document convenience wrapper. Kept for backward compatibility with
+    Part 1 callers. Delegates to `index_documents`.
+    """
+    return index_documents([doc_path], shipment_id)
+
+
 def query_document(question: str, shipment_id: str, n_results: int = 3) -> list[dict]:
-    """Return relevant chunks from a shipment's indexed document."""
+    """Return relevant chunks from a shipment's indexed document(s)."""
     store = _load(shipment_id)
     if store is None:
-        print(f"[RAG] No index found for shipment {shipment_id}")
+        log.info("No RAG index found for shipment %s", shipment_id)
         return []
     return store.query(question, top_k=n_results)
 
@@ -206,4 +233,4 @@ def delete_shipment_chunks(shipment_id: str) -> None:
     p = _store_path(shipment_id)
     if p.exists():
         p.unlink()
-        print(f"[RAG] Deleted index for shipment {shipment_id}")
+        log.info("Deleted RAG index for shipment %s", shipment_id)

@@ -5,9 +5,16 @@ from datetime import datetime
 from typing import Optional, Any
 from dotenv import load_dotenv
 
+from core.logging_config import get_logger
+from core.paths import resolve_data_path
+
 load_dotenv()
 
-DB_PATH = os.getenv("DB_PATH", "./data/trade_docs.db")
+log = get_logger(__name__)
+
+# Anchor to the project root so the SAME db is used no matter where the process
+# (uvicorn / streamlit / inbox triggers) is launched from.
+DB_PATH = resolve_data_path(os.getenv("DB_PATH", "./data/trade_docs.db"))
 
 
 def get_connection() -> sqlite3.Connection:
@@ -25,7 +32,51 @@ def init_db():
         schema = f.read()
     with get_connection() as conn:
         conn.executescript(schema)
-    print(f"DB initialized at {DB_PATH}")
+        _migrate_status_constraint(conn)
+    log.debug("DB initialized at %s", DB_PATH)
+
+
+def _migrate_status_constraint(conn) -> None:
+    """
+    Self-healing migration: an older DB created the `shipments` table before
+    'reply_sent' was a valid status, and SQLite can't ALTER a CHECK constraint.
+    `CREATE TABLE IF NOT EXISTS` never touches the existing table, so we detect
+    the stale definition from sqlite_master and rebuild it, preserving rows.
+
+    Reliable detection (the standalone migration's `UPDATE ... WHERE 1=0` check is
+    broken: a 0-row UPDATE never evaluates the CHECK, so it always false-passes).
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='shipments'"
+    ).fetchone()
+    if not row or not row["sql"]:
+        return
+    if "reply_sent" in row["sql"]:
+        return  # already up to date
+
+    log.info("Migrating shipments.status CHECK constraint to include 'reply_sent'...")
+    conn.executescript(
+        """
+        PRAGMA foreign_keys = OFF;
+        CREATE TABLE shipments_new (
+            id TEXT PRIMARY KEY,
+            customer_id TEXT NOT NULL,
+            status TEXT DEFAULT 'processing'
+                CHECK(status IN ('processing', 'approved', 'flagged',
+                                 'amendment_drafted', 'error', 'reply_sent')),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (customer_id) REFERENCES customers(id)
+        );
+        INSERT INTO shipments_new SELECT * FROM shipments;
+        DROP TABLE shipments;
+        ALTER TABLE shipments_new RENAME TO shipments;
+        CREATE INDEX IF NOT EXISTS idx_shipments_customer ON shipments(customer_id);
+        CREATE INDEX IF NOT EXISTS idx_shipments_status ON shipments(status);
+        PRAGMA foreign_keys = ON;
+        """
+    )
+    log.info("Migration complete: 'reply_sent' is now a valid shipment status.")
 
 
 # --- Customers ---
@@ -126,6 +177,41 @@ def update_shipment_status(shipment_id: str, status: str) -> None:
             "UPDATE shipments SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (status, shipment_id)
         )
+
+
+def get_shipment(shipment_id: str) -> Optional[dict]:
+    """Fetch one shipment joined with its customer name and concatenated doc filenames."""
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT s.*, c.name AS customer_name,
+                   (SELECT GROUP_CONCAT(sd.doc_filename, ', ')
+                    FROM shipment_documents sd WHERE sd.shipment_id = s.id) AS doc_filename
+            FROM shipments s
+            JOIN customers c ON s.customer_id = c.id
+            WHERE s.id = ?
+            """,
+            (shipment_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_all_shipments(limit: int = 200) -> list[dict]:
+    """All shipments across customers, newest first, with customer name + doc filenames."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT s.*, c.name AS customer_name,
+                   (SELECT GROUP_CONCAT(sd.doc_filename, ', ')
+                    FROM shipment_documents sd WHERE sd.shipment_id = s.id) AS doc_filename
+            FROM shipments s
+            JOIN customers c ON s.customer_id = c.id
+            ORDER BY s.created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_shipments_by_customer(customer_id: str) -> list[dict]:
@@ -285,4 +371,4 @@ def seed_demo_customers():
     for c in customers:
         create_customer(c["name"], c["id"])
         upsert_customer_rules(c["id"], c["rules"])
-    print("Demo customers seeded successfully.")
+    log.debug("Demo customers seeded successfully.")

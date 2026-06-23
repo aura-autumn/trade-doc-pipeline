@@ -9,3 +9,11 @@ inbox/failed/
 inbox/results/
 *.db
 data/rag_store/
+
+# Logs
+logs/
+
+# Frontend (React/Vite)
+frontend/node_modules/
+frontend/dist/
+.DS_Store

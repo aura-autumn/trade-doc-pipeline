@@ -4,7 +4,7 @@
     "successful_runs": 2,
     "avg_extraction_accuracy": 1.0,
     "decision_accuracy": 1.0,
-    "avg_latency_seconds": 4.05
+    "avg_latency_seconds": 3.76
   },
   "field_accuracy": {
     "consignee_name": {
@@ -42,10 +42,10 @@
   },
   "results": [
     {
-      "doc": "./data/sample_docs/sample_clean.pdf",
+      "doc": "C:\\Users\\Vikrant Yadav\\Desktop\\Ray\\NOVA\\trade-doc-pipeline\\data\\sample_docs\\sample_clean.pdf",
       "doc_type": "clean",
       "customer_id": "CUST001",
-      "elapsed_seconds": 4.44,
+      "elapsed_seconds": 4.91,
       "extraction": {
         "per_field": {
           "consignee_name": {
@@ -120,10 +120,10 @@
       "error": ""
     },
     {
-      "doc": "./data/sample_docs/sample_mismatch.pdf",
+      "doc": "C:\\Users\\Vikrant Yadav\\Desktop\\Ray\\NOVA\\trade-doc-pipeline\\data\\sample_docs\\sample_mismatch.pdf",
       "doc_type": "mismatch",
       "customer_id": "CUST001",
-      "elapsed_seconds": 3.66,
+      "elapsed_seconds": 2.6,
       "extraction": {
         "per_field": {
           "consignee_name": {

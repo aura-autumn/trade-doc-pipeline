@@ -22,8 +22,11 @@ from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from llm.client import get_llm, build_vision_message
+from core.logging_config import get_logger
 
 load_dotenv()
+
+log = get_logger(__name__)
 
 CONFIDENCE_LOW   = float(os.getenv("CONFIDENCE_THRESHOLD_LOW", 0.6))
 TEXT_MIN_CHARS   = int(os.getenv("TEXT_MIN_CHARS", 80))
@@ -149,11 +152,11 @@ def _find_tesseract() -> bool:
             pytesseract.pytesseract.tesseract_cmd = path
             try:
                 pytesseract.get_tesseract_version()
-                print(f"[Extractor] Found Tesseract at: {path}")
+                log.info("Found Tesseract at: %s", path)
                 return True
             except Exception:
                 continue
-    print("[Extractor] Tesseract not found. Install from https://github.com/UB-Mannheim/tesseract/wiki")
+    log.warning("Tesseract not found. Install from https://github.com/UB-Mannheim/tesseract/wiki")
     return False
 
 
@@ -221,7 +224,7 @@ def _ocr_image_file(path: str) -> str:
             proc = _preprocess_image(img)
             return pytesseract.image_to_string(proc, lang="eng", config="--psm 6 --oem 3")
     except Exception as e:
-        print(f"[Extractor] Image OCR failed: {e}")
+        log.warning("Image OCR failed: %s", e)
         return ""
 
 
@@ -248,7 +251,7 @@ def _ocr_pdf(path: str) -> str:
                     pages_text.append(t)
         doc.close()
     except Exception as e:
-        print(f"[Extractor] PDF OCR failed: {e}")
+        log.warning("PDF OCR failed: %s", e)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
     return "\n\n".join(pages_text)
@@ -276,14 +279,14 @@ def extract_text(filepath: str) -> tuple[str, str]:
     ]:
         t = fn(filepath)
         if _alphanum_len(t) >= TEXT_MIN_CHARS:
-            print(f"[Extractor] {name} extracted {_alphanum_len(t)} chars")
+            log.info("%s extracted %d chars", name, _alphanum_len(t))
             return t, name
 
     # All text methods failed → scanned PDF, render pages and OCR
-    print("[Extractor] Text layer empty — rendering pages for OCR...")
+    log.info("Text layer empty — rendering pages for OCR...")
     t = _ocr_pdf(filepath)
     if _alphanum_len(t) >= TEXT_MIN_CHARS:
-        print(f"[Extractor] OCR extracted {_alphanum_len(t)} chars")
+        log.info("OCR extracted %d chars", _alphanum_len(t))
         return t, "ocr_pdf"
 
     return "", "failed"
@@ -305,7 +308,7 @@ def _call_text_llm(text: str) -> dict:
 @retry(stop=stop_after_attempt(VISION_LLM_RETRIES), wait=wait_exponential(multiplier=1, min=2, max=6))
 def _call_vision_llm(doc_path: str) -> dict:
     """Vision LLM — last resort when text extraction completely fails."""
-    print("[Extractor] Falling back to Vision LLM...")
+    log.info("Falling back to Vision LLM...")
     llm = get_llm(vision=True)
     messages = build_vision_message(doc_path, EXTRACTION_PROMPT)
     response = llm.invoke(messages)
@@ -371,16 +374,15 @@ def run_extractor(doc_path: str) -> dict:
             raw = _call_text_llm(text)
             return _validate_extraction_structure(raw, method=extraction_method)
         except Exception as e:
-            print(f"[Extractor] Text LLM failed: {e}")
-            # fall through to vision
+            log.warning("Text LLM failed: %s — falling through to vision", e)
 
     # Step 3: Vision LLM as last resort
-    print(f"[Extractor] Text extraction yielded {_alphanum_len(text)} chars — trying Vision LLM")
+    log.info("Text extraction yielded %d chars — trying Vision LLM", _alphanum_len(text))
     try:
         raw = _call_vision_llm(doc_path)
         return _validate_extraction_structure(raw, method="vision_llm")
     except Exception as e:
-        print(f"[Extractor] Vision LLM also failed: {e}")
+        log.error("Vision LLM also failed: %s", e)
         return _validate_extraction_structure({}, method="failed")
 
 
