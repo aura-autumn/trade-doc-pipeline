@@ -1,0 +1,11 @@
+{
+  "from": "operations@zenith-trading.com",
+  "subject": "Complete Document Set — BOL + Invoice + Packing List for Zenith Trading",
+  "body": "Dear Team,\n\nPlease find attached the complete document set for this shipment:\n1. Invoice A\n2. Invoice B\n3. Invoice C\n\nAll three documents should be consistent. Please validate and revert with any discrepancies.\n\nRegards,\nMaria Santos\nZenith Trading Operations",
+  "customer_id": "CUST003",
+  "attachments": [
+    "../../data/sample_docs/batch_001/invoice_A.pdf",
+    "../../data/sample_docs/batch_001/invoice_B.pdf",
+    "../../data/sample_docs/batch_001/invoice_C.pdf"
+  ]
+}

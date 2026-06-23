@@ -1,0 +1,7 @@
+{
+  "from": "shipping@acme-exports.com",
+  "subject": "Shipment Documents — Invoice INV-2024-001 for Global Freight Corp",
+  "body": "Dear CG Team,\n\nPlease find attached the trade documents for our latest shipment:\n- Commercial Invoice INV-2024-001\n\nKindly validate and confirm at your earliest convenience.\n\nBest regards,\nAlex Chen\nACME Exports Ltd",
+  "customer_id": "CUST001",
+  "attachments": ["../../data/sample_docs/sample_clean.pdf"]
+}

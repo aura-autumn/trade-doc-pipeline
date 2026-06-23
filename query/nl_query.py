@@ -9,6 +9,9 @@ import json
 import re
 from db.database import run_raw_query, get_schema_description
 from llm.client import get_llm
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
 
 
 TEXT_TO_SQL_PROMPT = """You are a SQL expert for a trade document validation system.
@@ -66,9 +69,11 @@ def run_text_to_sql(question: str) -> dict:
         response = llm.invoke(prompt)
         raw_sql = response.content if hasattr(response, "content") else str(response)
         sql = _clean_sql(raw_sql)
+        log.info("Text-to-SQL | q=%r | sql=%s", question, sql)
 
         # Safety check
         if any(kw in sql.upper() for kw in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER"]):
+            log.warning("Blocked unsafe SQL generated for question %r: %s", question, sql)
             return {
                 "sql": sql,
                 "results": [],
@@ -89,6 +94,7 @@ def run_text_to_sql(question: str) -> dict:
         }
 
     except Exception as e:
+        log.error("Text-to-SQL failed for question %r: %s", question, e)
         return {
             "sql": "",
             "results": [],

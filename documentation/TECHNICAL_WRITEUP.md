@@ -7,7 +7,10 @@
 ## 1 | Architecture (where data flows, where state lives)
 
 ```
-            SU email / manual upload  (1+ PDFs or images per shipment)
+        SU EMAIL ARRIVES  (1+ PDFs per shipment)        TRIGGER [Part 2]
+          ├─ inbox/trigger.py       folder watcher (simulated inbox)
+          ├─ inbox/gmail_trigger.py real Gmail poller (OAuth)
+          └─ React "Simulate SU Email" / file upload  →  POST /api/pipeline/run
                               │
                               ▼
         ┌─────────────────────────────────────────────────────────┐
@@ -42,8 +45,9 @@
                    │                          per-shipment .pkl store
                    └───────────────┬──────────────────┘
                                    ▼
-                        Streamlit UI  [ui/app.py]
-        Run Pipeline · Shipment History · Query Layer · Customers · Eval
+                FastAPI  [api/main.py]  ── JSON ──►  React/Vite SPA  [frontend/]
+        Incoming(4 states) · Shipment History · Query · Manage Customers · Eval
+        (legacy Streamlit ui/app.py + ui/cg_app.py still runnable as a fallback)
 ```
 
 **Where state lives:** authoritative state is **SQLite**, written through at every stage and keyed by `shipment_id` (the same value used as the LangGraph `thread_id`). The graph checkpointer holds in-process state; RAG indexes are per-shipment pickles. One `shipment_id` ties together documents → extractions → validations → decision → RAG store.
@@ -62,7 +66,7 @@
 
 ## 3 | Observability (production for 50 customers)
 
-**Trace one shipment, email → verified output:** everything is keyed by `shipment_id`. Given one ID you can replay the full chain `shipment_documents` (what arrived) → `extraction_results` (every field, confidence, extraction `method`) → `validation_results` (per-field status, found/expected, cross-doc rows) → `decisions` (decision, reasoning, draft email) → the per-shipment RAG store → any NL queries run against it. For production I'd add **LangSmith tracing** for per-agent spans + token counts, structured logs tagged with `shipment_id` + `customer_id`, and a persisted `latency_ms`/`cost` per stage.
+**Trace one shipment, email → verified output:** everything is keyed by `shipment_id`. Given one ID you can replay the full chain `shipment_documents` (what arrived) → `extraction_results` (every field, confidence, extraction `method`) → `validation_results` (per-field status, found/expected, cross-doc rows) → `decisions` (decision, reasoning, draft email) → the per-shipment RAG store → any NL queries run against it. **Implemented now:** a central logging layer (`core/logging_config.py`) routes every stage — extractor, validator, router, RAG, query, the inbox triggers and the FastAPI request layer — to a coloured console stream and a rotating file at `logs/trade_pipeline.log`, with `LOG_LEVEL` switchable to `DEBUG` for full-step tracing. The API additionally logs the resolved DB path and seed counts at startup. For production I'd add **LangSmith tracing** for per-agent spans + token counts, attach `shipment_id` + `customer_id` to every log record, and persist `latency_ms`/`cost` per stage.
 
 **Dashboard would show:** STP rate and false-auto-approve rate (the two headline numbers); flag/amendment rates; per-customer volume and pending-queue depth; p50/p95 latency per doc; cost per doc and the **vision-fallback share** (the cost driver); confidence calibration (confident-wrong rate); top mismatched fields; and LLM error/retry rate.
 
@@ -99,3 +103,49 @@ Measured ~**3.7 s/doc** end-to-end on the clean samples. Breakdown: native-text 
 - **Rule versioning + audit UI**, and a **human-review queue** that captures every override as a training signal.
 - **The Part 2 email trigger** wired end-to-end, since the trigger and not the model is what makes this a real workflow.
 - **Honest hardening:** retry/timeout budgets per provider, a dead-letter path for docs that fail all extraction methods, and unit tests on the deterministic validator (its correctness is the system's trust anchor).
+
+---
+
+## 7 | Part 2 — Wiring it into the real CG workflow
+
+Part 1 ran on upload. Part 2's thesis is that **the trigger, not the model, is the
+missing piece**, so the work was connecting the existing agents to a real arrival
+event and a CG-usable interface — no agent code rewritten.
+
+**Trigger (the missing piece).** Three interchangeable front-ends feed the *same*
+`run_pipeline(docs, customer_id)`: a folder watcher (`inbox/trigger.py`, the
+simulated inbox the brief asks for), a real Gmail poller (`inbox/gmail_trigger.py`,
+OAuth, resolves customer from sender domain), and the React "Simulate SU Email" /
+upload form. All persist a result to SQLite + `inbox/results/` and surface in the
+CG UI's Inbox Watcher Feed. The agent **never sends** — every reply goes through
+the editable Draft Reply panel and a manual *Mark as Sent*.
+
+**Multi-doc + cross-validation.** A shipment is 1..N attachments. Extraction runs
+per document before the graph; the deterministic validator reconciles
+consignee/HS-code/gross-weight/invoice across all docs and emits
+`cross_doc_discrepancy_*` rows, shown as a dedicated red banner above the field
+table. `email_multi_doc.json` (3 docs) exercises this path.
+
+**UI migration (Streamlit → React + FastAPI).** The CG UI moved to a React/Vite SPA
+over a FastAPI JSON API (`api/main.py`) that calls the existing `pipeline/`, `db/`,
+`rag/`, `query/`, `eval/` directly. The verification view is a single flat table —
+Field · Value · Confidence · Status · Expected · Critical · Detail — chosen over
+click-to-expand so a CG operator reads the whole shipment in one glance; the
+cross-doc section and draft reply sit directly below, and a per-shipment RAG chat
+grounds follow-up questions. The blocking pipeline call runs in FastAPI's threadpool
+(sync route) so a multi-file run never freezes the server.
+
+**Three Part-2 bugs worth recording (found by running it, not hypotheticals):**
+- *RAG only indexed the first attachment.* `index_document` short-circuited if a
+  shipment was already indexed, so docs 2..N of a multi-doc shipment were silently
+  dropped from retrieval. Fixed with `index_documents(paths, shipment_id)` that
+  builds one store over the union of all the shipment's chunks.
+- *Empty DB depending on launch directory.* `DB_PATH`/`RAG_STORE` were relative to
+  the process CWD, so launching uvicorn from a subdir opened a different, empty
+  SQLite file — looking like "customers and history vanished." Anchored all data
+  paths to the project root (`core/paths.py`).
+- *`reply_sent` rejected by an old CHECK constraint.* Databases created before
+  `reply_sent` existed couldn't accept *Mark as Sent*, and the original migration's
+  self-check (`UPDATE … WHERE 1=0`) never triggered the constraint so it always
+  false-passed. `init_db()` now detects the stale DDL in `sqlite_master` and rebuilds
+  the table in place, preserving rows — self-healing on startup.
