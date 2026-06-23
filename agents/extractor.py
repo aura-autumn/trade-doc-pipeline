@@ -114,7 +114,7 @@ def _alphanum_len(text: str) -> int:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TESSERACT AUTO-DETECTION (stolen from CA pipeline — handles all OS paths)
+# TESSERACT AUTO-DETECTION
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _find_tesseract() -> bool:

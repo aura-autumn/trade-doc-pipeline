@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS customer_rules (
 CREATE TABLE IF NOT EXISTS shipments (
     id TEXT PRIMARY KEY,
     customer_id TEXT NOT NULL,
-    status TEXT DEFAULT 'processing' CHECK(status IN ('processing', 'approved', 'flagged', 'amendment_drafted', 'error')),
+    status TEXT DEFAULT 'processing' CHECK(status IN ('processing', 'approved', 'flagged', 'amendment_drafted', 'error', 'reply_sent')),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (customer_id) REFERENCES customers(id)

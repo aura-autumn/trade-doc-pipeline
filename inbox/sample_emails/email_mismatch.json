@@ -1,0 +1,7 @@
+{
+  "from": "docs@fastfreight.net",
+  "subject": "Trade Documents — Batch Shipment for Apex Logistics LLC",
+  "body": "Hi,\n\nAttaching invoice and packing list for your review.\n\nPlease process ASAP — vessel departs Friday.\n\nThanks,\nSam Rivera\nFast Freight Intl",
+  "customer_id": "CUST002",
+  "attachments": ["../../data/sample_docs/sample_mismatch.pdf"]
+}

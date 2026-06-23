@@ -146,3 +146,40 @@ If I had two more weeks, I'd build, in order:
 4. **An active-learning loop** from CG overrides every correction becomes a labeled example feeding calibration and prompt/rule tuning.
 
 I'd pick these over, say, a prettier UI or more document types because **trust and the real trigger** are what determine whether the "boring 80%" actually gets automated and everything else is polish on top of an unproven core.
+
+---------------------------------------------------------------------------------------------------------------------------------------------
+
+# Part 2 PRD — CG Verification Workflow
+**Nova · GoComet · Full-Stack AI Engineer DAW**
+
+---
+
+## Personas
+
+**CG Operator (Maria, 4 years in cargo validation)**
+Opens 40–80 emails a day. Every email could have one PDF or five. She doesn't care how the agent works — she cares whether the flagged fields are right and whether the draft reply is something she can send in one edit. Her fear: approving a wrong HS code and causing a customs hold for her customer.
+
+**SU (Shipping Unit / Supplier — Alex, logistics coordinator)**
+His job feels done the moment the email is sent. He wants one clear reply: approved, or here's exactly what to fix. He does not want a back-and-forth of vague requests — he wants field name, what he submitted, what's expected.
+
+---
+
+## Jobs-to-be-Done
+
+**When** a new document email arrives from SU, **I want** the agent to surface field-level issues before I even open the attachments, **so that** I can decide in 10 seconds whether to approve or action an amendment.
+
+**When** there's a discrepancy, **I want** to see exactly what the agent found vs. what the customer requires for each field, **so that** I don't have to re-read the document myself to write the amendment.
+
+---
+
+## North-Star Metric
+
+**CG validation cycle time per shipment** — median time from SU email received to CG clicking "send" on the verification reply, measured in minutes. Target: <15 min. Today: 60–240 min.
+
+---
+
+## Critical Failure Mode & Guard
+
+**Worst thing the agent could do:** Auto-approve a shipment with a wrong HS code or consignee name — causing a customs hold the customer then blames CG for.
+
+**Guard:** The agent never sends. Every email goes through the CG "Draft Reply" screen where the operator reads, edits, and clicks send. All uncertain fields are surfaced — never silently approved. Critical field mismatches always trigger `draft_amendment`, never `auto_approve`. The routing logic is rule-based and deterministic; the LLM only writes the email, it does not make the approval decision.
